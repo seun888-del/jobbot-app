@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, safeStorage, dialog, shell } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
 const db = require('./src/db/database');
@@ -6,6 +7,10 @@ const queueReader = require('./src/db/queueReader');
 const cvAnalyzer = require('./src/services/cvAnalyzer');
 const botManager = require('./src/services/botManager');
 const { JOBBOT_BACKEND_URL } = require('./src/config');
+
+autoUpdater.setFeedURL({ provider: 'github', owner: 'seun888-del', repo: 'jobbot-app' });
+autoUpdater.autoDownload = true;
+autoUpdater.autoInstallOnAppQuit = true;
 
 let mainWindow;
 
@@ -34,6 +39,14 @@ app.whenReady().then(async () => {
   botManager.setStatusHandler((bot, status) => {
     mainWindow?.webContents.send('bot:status', { bot, status });
   });
+
+  // Check for updates silently — download in background, install on next quit
+  if (app.isPackaged) {
+    autoUpdater.checkForUpdates().catch(() => {});
+    autoUpdater.on('update-downloaded', () => {
+      mainWindow?.webContents.send('update:ready');
+    });
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

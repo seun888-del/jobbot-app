@@ -26,6 +26,7 @@ async function render(view) {
     case 'search':     return renderSearch();
     case 'license':    return renderLicense();
     case 'dashboard':  return renderDashboard();
+    case 'help':       return renderHelp();
     default:           return renderPersonal();
   }
 }
@@ -916,6 +917,96 @@ function initOnboarding() {
   document.getElementById('welcome-skip-btn').addEventListener('click', () => {
     overlay.remove();
     localStorage.setItem('welcome_seen', '1');
+  });
+}
+
+// ── Help ─────────────────────────────────────────────────────────────────
+function renderHelp() {
+  const faqs = [
+    {
+      q: 'How do I get started?',
+      a: 'Complete all 4 setup steps in order: (1) Personal Details, (2) Job Site Login, (3) upload your CVs, (4) Search Preferences. Then activate your license and go to the Dashboard to start the bots.'
+    },
+    {
+      q: 'Which job sites does JobBot use?',
+      a: 'JobBot searches and applies on Reed.co.uk and LinkedIn. Make sure you have saved your login credentials for both on the Job Site Login page.'
+    },
+    {
+      q: 'What are the three bots and what do they do?',
+      a: 'Reed Bot searches Reed.co.uk and submits applications. LinkedIn Bot does the same on LinkedIn. Scorer Bot runs in the middle — it uses AI to tailor your CV for each role before it is sent. You should run all three together.'
+    },
+    {
+      q: 'The bot opened a browser window and stopped — what do I do?',
+      a: 'This means the job site is asking you to log in or complete a security check. Complete the login in the browser window that opened — the bot will continue automatically once you are signed in.'
+    },
+    {
+      q: 'Why are some jobs showing as skipped?',
+      a: 'Jobs are skipped when they do not match your preferences — for example, wrong work type, no easy apply button, external application site, or below your minimum match score. This is normal and expected.'
+    },
+    {
+      q: 'How do I add more CVs?',
+      a: 'Go to the CVs section in the sidebar and click "Add CV". You can upload multiple CVs — JobBot will automatically select the best one for each job based on the match score.'
+    },
+    {
+      q: 'What is the minimum match score?',
+      a: 'Set this in Search Preferences. JobBot will only apply to jobs where your tailored CV scores at or above this percentage. Leave it blank to apply to all jobs regardless of score.'
+    },
+    {
+      q: 'The bots are running but no jobs are being found — why?',
+      a: 'Your search terms may have exhausted all available jobs. Try adding more search terms in Search Preferences — for example, if you have "IT Support Analyst", also add "IT Support Specialist" or "Help Desk Analyst".'
+    },
+    {
+      q: 'Windows shows a security warning when I install JobBot — is it safe?',
+      a: 'Yes, this is normal for new software that has not yet been code-signed. Click "More info" then "Run anyway" to proceed. Your device is not at risk.'
+    },
+    {
+      q: 'Mac shows "unidentified developer" — what do I do?',
+      a: 'Go to System Settings → Privacy & Security, scroll down and click "Open Anyway". This is a standard Mac security prompt for new apps and is safe to bypass.'
+    },
+    {
+      q: 'Will my Reed and LinkedIn passwords be shared or stored online?',
+      a: 'No. Your credentials are encrypted using your device\'s secure storage and never leave your computer. JobBot does not upload or transmit your passwords anywhere.'
+    },
+    {
+      q: 'How do I cancel or manage my subscription?',
+      a: 'Reply to your trial or license email and we will sort it out for you straight away.'
+    },
+  ];
+
+  content.innerHTML = `
+    <div class="view-header"><h2>Help &amp; FAQs</h2></div>
+    <div class="help-faq">
+      ${faqs.map((f, i) => `
+        <div class="faq-item" id="faq-${i}">
+          <button class="faq-question" onclick="toggleFaq(${i})">
+            <span>${f.q}</span>
+            <span class="faq-chevron">›</span>
+          </button>
+          <div class="faq-answer">${f.a}</div>
+        </div>
+      `).join('')}
+    </div>
+    <div class="help-contact">
+      <p>Still need help? Email us at <a href="mailto:merritfemi@gmail.com">merritfemi@gmail.com</a> and we'll get back to you.</p>
+    </div>
+  `;
+}
+
+window.toggleFaq = function(i) {
+  const item = document.getElementById(`faq-${i}`);
+  item.classList.toggle('open');
+};
+
+// ── Auto-update banner ────────────────────────────────────────────────────
+if (window.api?.onUpdateReady) {
+  window.api.onUpdateReady(() => {
+    const banner = document.getElementById('expiry-banner');
+    if (banner) {
+      banner.innerHTML = `<span>A new version of JobBot is ready. It will install automatically when you close the app.</span>`;
+      banner.style.display = 'flex';
+      banner.style.background = '#4f46e5';
+      banner.style.color = '#fff';
+    }
   });
 }
 

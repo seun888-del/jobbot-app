@@ -52,6 +52,9 @@ contextBridge.exposeInMainWorld('api', {
   shell: {
     openPath: (filePath) => ipcRenderer.invoke('shell:openPath', filePath),
   },
+  onUpdateReady: (callback) => {
+    ipcRenderer.on('update:ready', () => callback());
+  },
   license: {
     get: () => ipcRenderer.invoke('license:get'),
     save: (fields) => ipcRenderer.invoke('license:save', fields),

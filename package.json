@@ -10,6 +10,7 @@
     "dist:mac": "electron-builder --mac"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "pdf-parse": "^1.1.4",
     "pdfkit": "^0.15.0",
     "playwright": "^1.48.0",
@@ -40,12 +41,27 @@
       }
     ],
     "win": {
-      "target": [{"target": "nsis", "arch": ["x64"]}],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "icon": "assets/icon.ico",
       "signAndEditExecutable": false
     },
     "mac": {
-      "target": [{"target": "dmg", "arch": ["x64", "arm64"]}],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
       "icon": "assets/icon.icns",
       "category": "public.app-category.productivity",
       "hardenedRuntime": true,
@@ -54,8 +70,16 @@
     "dmg": {
       "title": "JobBot",
       "contents": [
-        {"x": 130, "y": 220},
-        {"x": 410, "y": 220, "type": "link", "path": "/Applications"}
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "nsis": {
