@@ -30,6 +30,11 @@ function isRelevantTitle(title) {
   return !cfg.TITLE_BLOCKLIST.some(k => t.includes(k));
 }
 
+function isBlockedCompany(company) {
+  const c = (company || '').toLowerCase();
+  return cfg.COMPANY_BLOCKLIST.some(b => c.includes(b));
+}
+
 function detectWorkType(description) {
   const d = (description || '').toLowerCase();
   const isRemote = /\bfully remote\b|\b100%\s*remote\b|\bremote only\b|\bremote position\b|\bwork from home\b|\bwfh\b|\bremote working\b|\bremote role\b/.test(d);
@@ -71,6 +76,11 @@ async function phase1_searchAndQueue(page) {
       }
       if (!isRelevantTitle(job.title)) {
         console.log(`  [Indeed Bot] Title filter — skipping: ${job.title}`);
+        continue;
+      }
+
+      if (isBlockedCompany(job.company)) {
+        console.log(`  [Indeed Bot] Company blocked — skipping: ${job.title} @ ${job.company}`);
         continue;
       }
 

@@ -7,19 +7,21 @@ const { JOBBOT_BACKEND_URL } = require('../config');
 const BOT_DIR = path.join(__dirname, '..', '..', 'bot');
 
 const BOT_SCRIPTS = {
-  reed:      'bot_reed.js',
-  scorer:    'bot_scorer.js',
-  linkedin:  'bot_linkedin.js',
-  indeed:    'bot_indeed.js',
-  glassdoor: 'bot_glassdoor.js',
+  reed:       'bot_reed.js',
+  scorer:     'bot_scorer.js',
+  linkedin:   'bot_linkedin.js',
+  indeed:     'bot_indeed.js',
+  glassdoor:  'bot_glassdoor.js',
+  cvlibrary:  'bot_cvlibrary.js',
 };
 
 const bots = {
-  reed:      { proc: null, status: 'stopped', stopping: false },
-  scorer:    { proc: null, status: 'stopped', stopping: false },
-  linkedin:  { proc: null, status: 'stopped', stopping: false },
-  indeed:    { proc: null, status: 'stopped', stopping: false },
-  glassdoor: { proc: null, status: 'stopped', stopping: false },
+  reed:       { proc: null, status: 'stopped', stopping: false },
+  scorer:     { proc: null, status: 'stopped', stopping: false },
+  linkedin:   { proc: null, status: 'stopped', stopping: false },
+  indeed:     { proc: null, status: 'stopped', stopping: false },
+  glassdoor:  { proc: null, status: 'stopped', stopping: false },
+  cvlibrary:  { proc: null, status: 'stopped', stopping: false },
 };
 
 let logHandler = null;
@@ -35,12 +37,25 @@ function emitStatus(botName, status) {
 
 function getStatus() {
   return {
-    reed:      bots.reed.status,
-    scorer:    bots.scorer.status,
-    linkedin:  bots.linkedin.status,
-    indeed:    bots.indeed.status,
-    glassdoor: bots.glassdoor.status,
+    reed:       bots.reed.status,
+    scorer:     bots.scorer.status,
+    linkedin:   bots.linkedin.status,
+    indeed:     bots.indeed.status,
+    glassdoor:  bots.glassdoor.status,
+    cvlibrary:  bots.cvlibrary.status,
   };
+}
+
+function isWithinSchedule() {
+  const prefs = db.getSearchPreferences();
+  if (!prefs.schedule_enabled) return true;
+  const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const now = new Date();
+  const today = DAY_NAMES[now.getDay()];
+  const allowedDays = (prefs.schedule_days || 'Mon,Tue,Wed,Thu,Fri').split(',');
+  if (!allowedDays.includes(today)) return false;
+  const hour = now.getHours();
+  return hour >= (prefs.schedule_start ?? 9) && hour < (prefs.schedule_end ?? 18);
 }
 
 // Spawn via the Electron binary itself (ELECTRON_RUN_AS_NODE) since a
@@ -48,6 +63,11 @@ function getStatus() {
 function start(botName, userDataPath) {
   if (!BOT_SCRIPTS[botName]) throw new Error(`Unknown bot: ${botName}`);
   if (bots[botName].proc) return;
+
+  if (!isWithinSchedule()) {
+    const prefs = db.getSearchPreferences();
+    throw new Error(`Outside scheduled hours (${prefs.schedule_start}:00–${prefs.schedule_end}:00). Change your schedule in Search Preferences.`);
+  }
 
   const env = {
     ...process.env,
@@ -118,6 +138,17 @@ function start(botName, userDataPath) {
     env.GLASSDOOR_PASS = safeStorage.decryptString(Buffer.from(cred.secret_enc, 'base64'));
   }
 
+  if (botName === 'cvlibrary') {
+    const cred = db.getCredential('cvlibrary');
+    if (!cred || !cred.secret_enc) {
+      throw new Error('No CV-Library credentials saved — connect your account on the Dashboard');
+    }
+    if (!safeStorage.isEncryptionAvailable()) {
+      throw new Error('OS-level credential encryption is not available on this machine');
+    }
+    env.CVLIB_EMAIL = cred.username;
+    env.CVLIB_PASS = safeStorage.decryptString(Buffer.from(cred.secret_enc, 'base64'));
+  }
 
   const scriptPath = path.join(BOT_DIR, BOT_SCRIPTS[botName]);
   const proc = spawn(process.execPath, [scriptPath], { cwd: BOT_DIR, env });

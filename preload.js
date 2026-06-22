@@ -21,6 +21,11 @@ contextBridge.exposeInMainWorld('api', {
     delete: (id) => ipcRenderer.invoke('excludeKeywords:delete', id),
     setActive: (id, isActive) => ipcRenderer.invoke('excludeKeywords:setActive', id, isActive),
   },
+  blacklist: {
+    get: () => ipcRenderer.invoke('blacklist:get'),
+    add: (company) => ipcRenderer.invoke('blacklist:add', company),
+    remove: (id) => ipcRenderer.invoke('blacklist:remove', id),
+  },
   cvs: {
     get: () => ipcRenderer.invoke('cvs:get'),
     pickAndAdd: (label) => ipcRenderer.invoke('cvs:pickAndAdd', label),

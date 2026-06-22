@@ -26,6 +26,11 @@ function isRelevantTitle(title) {
   return !cfg.TITLE_BLOCKLIST.some(k => t.includes(k));
 }
 
+function isBlockedCompany(company) {
+  const c = (company || '').toLowerCase();
+  return cfg.COMPANY_BLOCKLIST.some(b => c.includes(b));
+}
+
 // Detect work type from job description text
 // Returns 'remote', 'hybrid', or 'onsite'
 function detectWorkType(description) {
@@ -77,6 +82,11 @@ async function phase1_searchAndQueue(browser, reedPage) {
 
       if (!isRelevantTitle(job.title)) {
         console.log(`  [Reed Bot] Title filter — skipping: ${job.title}`);
+        continue;
+      }
+
+      if (isBlockedCompany(job.company)) {
+        console.log(`  [Reed Bot] Company blocked — skipping: ${job.title} @ ${job.company}`);
         continue;
       }
 

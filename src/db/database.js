@@ -128,10 +128,22 @@ async function init(userDataPath) {
     db.exec('ALTER TABLE profile ADD COLUMN eeo_veteran TEXT');
   }
 
-  // Migration: add job_age to search_preferences
+  // Migration: add job_age + schedule columns to search_preferences
   const searchPrefsCols = db.prepare('PRAGMA table_info(search_preferences)').all().map(c => c.name);
   if (!searchPrefsCols.includes('job_age')) {
     db.exec("ALTER TABLE search_preferences ADD COLUMN job_age TEXT DEFAULT 'r1209600'");
+  }
+  if (!searchPrefsCols.includes('schedule_enabled')) {
+    db.exec('ALTER TABLE search_preferences ADD COLUMN schedule_enabled INTEGER DEFAULT 0');
+  }
+  if (!searchPrefsCols.includes('schedule_days')) {
+    db.exec("ALTER TABLE search_preferences ADD COLUMN schedule_days TEXT DEFAULT 'Mon,Tue,Wed,Thu,Fri'");
+  }
+  if (!searchPrefsCols.includes('schedule_start')) {
+    db.exec('ALTER TABLE search_preferences ADD COLUMN schedule_start INTEGER DEFAULT 9');
+  }
+  if (!searchPrefsCols.includes('schedule_end')) {
+    db.exec('ALTER TABLE search_preferences ADD COLUMN schedule_end INTEGER DEFAULT 18');
   }
 
   // Seed singleton rows
@@ -306,6 +318,22 @@ function saveLicense(fields) {
   return getLicense();
 }
 
+// ── Company blacklist ────────────────────────────────────────────────────
+function getCompanyBlacklist() {
+  return db.prepare('SELECT * FROM company_blacklist ORDER BY company ASC').all();
+}
+
+function addCompanyToBlacklist(company) {
+  const trimmed = (company || '').trim();
+  if (!trimmed) return null;
+  db.prepare('INSERT OR IGNORE INTO company_blacklist (company) VALUES (?)').run([trimmed]);
+  return db.prepare('SELECT * FROM company_blacklist WHERE company = ?').get([trimmed]);
+}
+
+function removeCompanyFromBlacklist(id) {
+  db.prepare('DELETE FROM company_blacklist WHERE id = ?').run([id]);
+}
+
 module.exports = {
   init,
   getDb,
@@ -329,4 +357,7 @@ module.exports = {
   recordBotStop,
   getLicense,
   saveLicense,
+  getCompanyBlacklist,
+  addCompanyToBlacklist,
+  removeCompanyFromBlacklist,
 };

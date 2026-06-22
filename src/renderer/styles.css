@@ -488,6 +488,29 @@ button.secondary:disabled { background: var(--surface-alt); color: var(--text-fa
 .coming-soon-badge { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; background: #f59e0b; color: #fff; border-radius: 20px; padding: 2px 10px; }
 .coming-soon-text { font-size: 13px; color: var(--text-muted); margin: 8px 0 0; line-height: 1.5; }
 
+/* ── Day picker (schedule) ─────────────────────────────────────────────── */
+.day-picker { display: flex; gap: 6px; flex-wrap: wrap; }
+.day-btn { background: var(--surface-alt); border: 1.5px solid var(--border); color: var(--text-muted); font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 20px; cursor: pointer; font-family: inherit; transition: background var(--transition), color var(--transition), border-color var(--transition); }
+.day-btn.active { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
+.day-btn:hover:not(.active) { border-color: var(--text-muted); }
+
+/* ── Unconnected bot card ──────────────────────────────────────────────── */
+.bot-card-unconnected { border: 1.5px dashed var(--border) !important; background: var(--surface-alt) !important; }
+.bot-badge-lock { font-size: 11px; font-weight: 600; color: var(--text-faint); background: var(--bg); border: 1px solid var(--border); border-radius: 20px; padding: 2px 10px; }
+.bot-connect-hint { font-size: 13px; color: var(--text-muted); margin: 0 0 14px; line-height: 1.5; }
+.connect-btn { background: transparent; border: 1.5px solid var(--primary); color: var(--primary); font-size: 13px; font-weight: 700; padding: 7px 18px; border-radius: var(--radius-sm); cursor: pointer; font-family: inherit; transition: background var(--transition), color var(--transition); margin-top: 0; }
+.connect-btn:hover { background: var(--primary); color: #fff; }
+.btn-text-muted { background: none; border: none; color: var(--text-faint); font-size: 12px; font-weight: 500; cursor: pointer; padding: 4px 6px; font-family: inherit; text-decoration: underline; text-underline-offset: 2px; margin-top: 0; }
+.btn-text-muted:hover { color: var(--text-muted); }
+
+/* ── Credential modal ──────────────────────────────────────────────────── */
+.cred-modal-overlay { position: fixed; inset: 0; background: rgba(15,23,42,0.45); display: flex; align-items: center; justify-content: center; z-index: 1000; backdrop-filter: blur(2px); }
+.cred-modal-card { background: var(--surface); border-radius: 14px; padding: 32px 28px; width: 380px; max-width: calc(100vw - 48px); box-shadow: 0 24px 64px rgba(15,23,42,0.22); }
+.cred-modal-card h3 { margin: 0 0 6px; font-size: 18px; font-weight: 700; letter-spacing: -0.02em; }
+.cred-modal-hint { font-size: 13px; color: var(--text-muted); margin: 0 0 20px; line-height: 1.5; }
+.cred-modal-actions { display: flex; gap: 10px; margin-top: 16px; }
+.cred-modal-actions button { flex: 1; }
+
 /* ── Main wrapper (expiry banner + content) ───────────────────────────── */
 .main-wrapper { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .main-wrapper main { flex: 1; overflow-y: auto; }

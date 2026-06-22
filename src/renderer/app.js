@@ -390,9 +390,12 @@ async function renderCVs() {
 
 // ── 4. Search Preferences ──────────────────────────────────────────────────
 async function renderSearch() {
-  const prefs = await window.api.searchPrefs.get();
-  const terms = await window.api.searchTerms.get();
-  const excludes = await window.api.excludeKeywords.get();
+  const [prefs, terms, excludes, blacklist] = await Promise.all([
+    window.api.searchPrefs.get(),
+    window.api.searchTerms.get(),
+    window.api.excludeKeywords.get(),
+    window.api.blacklist.get(),
+  ]);
 
   content.innerHTML = `
     <div class="page-header">
@@ -462,6 +465,54 @@ async function renderSearch() {
     </div>
 
     <div class="card">
+      <h3>Blocked Companies</h3>
+      <p class="card-hint">Jobs from these companies are skipped automatically.</p>
+      <div class="tag-list" id="blacklist-list">
+        ${blacklist.map(b => `<div class="tag exclude">${b.company} <button data-id="${b.id}" data-type="blacklist">×</button></div>`).join('') || '<div class="empty-state">No blocked companies</div>'}
+      </div>
+      <div class="input-group">
+        <div class="field"><input id="new_company" placeholder="e.g. Capita, Serco, Reed Staffing"></div>
+        <button class="primary" id="add-company">Block</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Bot Schedule</h3>
+      <p class="card-hint">Restrict the bots to specific hours. When outside schedule, Start is blocked.</p>
+      <div class="checkbox-field" style="margin-bottom:16px">
+        <input id="schedule_enabled" type="checkbox" ${prefs.schedule_enabled ? 'checked' : ''}>
+        <label for="schedule_enabled">Enable schedule</label>
+      </div>
+      <div id="schedule-settings" style="${prefs.schedule_enabled ? '' : 'opacity:0.4;pointer-events:none'}">
+        <div class="field-row" style="align-items:flex-end;gap:16px;margin-bottom:14px">
+          <div class="field">
+            <label>Start time</label>
+            <select id="schedule_start">
+              ${Array.from({length:24},(_,h)=>`<option value="${h}" ${(prefs.schedule_start??9)==h?'selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label>End time</label>
+            <select id="schedule_end">
+              ${Array.from({length:24},(_,h)=>`<option value="${h}" ${(prefs.schedule_end??18)==h?'selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Active days</label>
+          <div class="day-picker">
+            ${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d => {
+              const active = (prefs.schedule_days||'Mon,Tue,Wed,Thu,Fri').split(',').includes(d);
+              return `<button class="day-btn${active?' active':''}" data-day="${d}">${d}</button>`;
+            }).join('')}
+          </div>
+        </div>
+      </div>
+      <button class="primary" id="save-schedule" style="margin-top:16px">Save Schedule</button>
+      <div class="status-msg" id="status-schedule"></div>
+    </div>
+
+    <div class="card">
       <h3>Application Limits</h3>
       <div class="field"><label>Max applications per day</label><input id="max_apps" type="number" min="1"></div>
       <div class="field">
@@ -527,6 +578,53 @@ async function renderSearch() {
       await window.api.excludeKeywords.delete(Number(btn.dataset.id));
       renderSearch();
     });
+  });
+
+  // Company blacklist
+  document.getElementById('add-company').addEventListener('click', async () => {
+    const val = document.getElementById('new_company').value.trim();
+    if (!val) return;
+    await window.api.blacklist.add(val);
+    document.getElementById('new_company').value = '';
+    renderSearch();
+  });
+  document.getElementById('new_company').addEventListener('keydown', async e => {
+    if (e.key !== 'Enter') return;
+    const val = e.target.value.trim();
+    if (!val) return;
+    await window.api.blacklist.add(val);
+    e.target.value = '';
+    renderSearch();
+  });
+  content.querySelectorAll('button[data-type="blacklist"]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await window.api.blacklist.remove(Number(btn.dataset.id));
+      renderSearch();
+    });
+  });
+
+  // Schedule toggle
+  const scheduleToggle = document.getElementById('schedule_enabled');
+  const scheduleSettings = document.getElementById('schedule-settings');
+  scheduleToggle.addEventListener('change', () => {
+    scheduleSettings.style.opacity = scheduleToggle.checked ? '1' : '0.4';
+    scheduleSettings.style.pointerEvents = scheduleToggle.checked ? '' : 'none';
+  });
+
+  // Day picker
+  content.querySelectorAll('.day-btn').forEach(btn => {
+    btn.addEventListener('click', () => btn.classList.toggle('active'));
+  });
+
+  document.getElementById('save-schedule').addEventListener('click', async () => {
+    const activeDays = [...content.querySelectorAll('.day-btn.active')].map(b => b.dataset.day).join(',');
+    await window.api.searchPrefs.save({
+      schedule_enabled: scheduleToggle.checked ? 1 : 0,
+      schedule_days: activeDays || 'Mon,Tue,Wed,Thu,Fri',
+      schedule_start: Number(document.getElementById('schedule_start').value),
+      schedule_end: Number(document.getElementById('schedule_end').value),
+    });
+    showStatus(document.getElementById('status-schedule'), 'Schedule saved');
   });
 }
 
@@ -671,7 +769,7 @@ async function renderLicense() {
 }
 
 // ── Dashboard ────────────────────────────────────────────────────────────
-const BOT_LABELS = { reed: 'Reed Bot', scorer: 'Scorer Bot (AI)', linkedin: 'LinkedIn Bot', indeed: 'Indeed Bot', glassdoor: 'Glassdoor Bot' };
+const BOT_LABELS = { reed: 'Reed Bot', scorer: 'Scorer Bot (AI)', linkedin: 'LinkedIn Bot', indeed: 'Indeed Bot', glassdoor: 'Glassdoor Bot', cvlibrary: 'CV-Library Bot' };
 
 let botLogUnsub = null;
 let botStatusUnsub = null;
@@ -744,20 +842,62 @@ function statusBadgeClass(status) {
   }
 }
 
+const CREDS_NEEDED = new Set(['reed', 'linkedin', 'indeed', 'glassdoor', 'cvlibrary']);
+const CRED_SITE_NAMES = { reed: 'Reed.co.uk', linkedin: 'LinkedIn', indeed: 'Indeed', glassdoor: 'Glassdoor', cvlibrary: 'CV-Library' };
+
 async function renderDashboard() {
-  const [summary, recent, status, license, profile, dailyApps] = await Promise.all([
+  const [summary, recent, status, license, profile, dailyApps, reedCred, liCred, indeedCred, gdCred, cvlibCred] = await Promise.all([
     window.api.queue.summary(),
     window.api.queue.recent(20),
     window.api.bot.status(),
     window.api.license.get(),
     window.api.profile.get(),
     window.api.queue.dailyApplications(14),
+    window.api.credentials.get('reed'),
+    window.api.credentials.get('linkedin'),
+    window.api.credentials.get('indeed'),
+    window.api.credentials.get('glassdoor'),
+    window.api.credentials.get('cvlibrary'),
   ]);
   const isUS = (profile?.country || 'United Kingdom') === 'United States';
   dashboardHasLicense = !!(license?.license_key && (!license.expires_at || new Date(license.expires_at) > Date.now()));
 
+  const dashCreds = { reed: reedCred, linkedin: liCred, indeed: indeedCred, glassdoor: gdCred, cvlibrary: cvlibCred };
   const counts = {};
   summary.forEach(row => { counts[row.status] = row.count; });
+
+  function buildBotCard(key, label) {
+    const needsCreds = CREDS_NEEDED.has(key);
+    const isConnected = !needsCreds || !!dashCreds[key]?.username;
+    const isRunning = status[key] === 'running';
+
+    if (!isConnected) {
+      return `
+        <div class="card bot-card bot-card-unconnected" id="bot-card-${key}">
+          <div class="bot-card-header">
+            <strong>${label}</strong>
+            <span class="bot-badge-lock">Not connected</span>
+          </div>
+          <p class="bot-connect-hint">Connect your ${CRED_SITE_NAMES[key]} account to enable this bot.</p>
+          <div class="bot-card-actions">
+            <button class="connect-btn" data-bot="${key}" data-action="connect">Connect account →</button>
+          </div>
+        </div>`;
+    }
+
+    return `
+      <div class="card bot-card${isRunning ? ' bot-card-running' : ''}" id="bot-card-${key}">
+        <div class="bot-card-header">
+          <strong>${label}</strong>
+          <span class="bot-status bot-status-${status[key]}" id="status-${key}">${status[key]}</span>
+        </div>
+        <div class="bot-card-actions">
+          <button class="primary" data-bot="${key}" data-action="start" ${!dashboardHasLicense || isRunning ? 'disabled' : ''}>Start</button>
+          <button class="secondary" data-bot="${key}" data-action="stop" ${!isRunning ? 'disabled' : ''}>Stop</button>
+          ${needsCreds ? `<button class="btn-text-muted" data-bot="${key}" data-action="connect">Change login</button>` : ''}
+        </div>
+      </div>`;
+  }
 
   content.innerHTML = `
     <div class="page-header">
@@ -774,18 +914,7 @@ async function renderDashboard() {
     ${buildPreflightWarning(profile)}
 
     <div class="bot-controls">
-      ${Object.entries(BOT_LABELS).filter(([key]) => !(isUS && key === 'reed')).map(([key, label]) => `
-        <div class="card bot-card${status[key] === 'running' ? ' bot-card-running' : ''}" id="bot-card-${key}">
-          <div class="bot-card-header">
-            <strong>${label}</strong>
-            <span class="bot-status bot-status-${status[key]}" id="status-${key}">${status[key]}</span>
-          </div>
-          <div class="bot-card-actions">
-            <button class="primary" data-bot="${key}" data-action="start" ${!dashboardHasLicense || status[key] === 'running' ? 'disabled' : ''}>Start</button>
-            <button class="secondary" data-bot="${key}" data-action="stop" ${status[key] !== 'running' ? 'disabled' : ''}>Stop</button>
-          </div>
-        </div>
-      `).join('')}
+      ${Object.entries(BOT_LABELS).filter(([key]) => !(isUS && key === 'reed')).map(([key, label]) => buildBotCard(key, label)).join('')}
     </div>
     <div class="status-msg" id="bot-error"></div>
 
@@ -848,6 +977,10 @@ async function renderDashboard() {
 
   content.querySelectorAll('button[data-action]').forEach(btn => {
     btn.addEventListener('click', async () => {
+      if (btn.dataset.action === 'connect') {
+        openCredModal(btn.dataset.bot, dashCreds[btn.dataset.bot]?.username || '');
+        return;
+      }
       if (btn.dataset.action === 'start' && !dashboardHasLicense) return;
       const errorEl = document.getElementById('bot-error');
       errorEl.className = 'status-msg';
@@ -860,6 +993,8 @@ async function renderDashboard() {
       }
     });
   });
+
+  ensureCredModal();
 
   // Re-subscribe to live log/status streams (drop the previous view's listeners)
   if (botLogUnsub) botLogUnsub();
@@ -901,6 +1036,55 @@ async function renderDashboard() {
   });
 }
 
+// ── Credential modal (shared across all bot cards) ───────────────────────
+let credModalBot = null;
+
+function ensureCredModal() {
+  if (document.getElementById('cred-modal')) return;
+
+  const el = document.createElement('div');
+  el.id = 'cred-modal';
+  el.className = 'cred-modal-overlay';
+  el.style.display = 'none';
+  el.innerHTML = `
+    <div class="cred-modal-card">
+      <h3 id="cred-modal-title">Connect account</h3>
+      <p class="cred-modal-hint">Stored encrypted on this device only — never sent to our servers.</p>
+      <div class="field"><label>Email</label><input id="cred-email" type="email" autocomplete="email" placeholder="you@example.com"></div>
+      <div class="field"><label>Password</label><input id="cred-password" type="password" autocomplete="current-password" placeholder="••••••••"></div>
+      <div class="status-msg" id="cred-status"></div>
+      <div class="cred-modal-actions">
+        <button class="primary" id="cred-save">Save & Connect</button>
+        <button class="secondary" id="cred-cancel">Cancel</button>
+      </div>
+    </div>`;
+  document.body.appendChild(el);
+
+  el.addEventListener('click', e => { if (e.target === el) el.style.display = 'none'; });
+  document.getElementById('cred-cancel').addEventListener('click', () => { el.style.display = 'none'; });
+  document.getElementById('cred-save').addEventListener('click', async () => {
+    const email = document.getElementById('cred-email').value.trim();
+    const password = document.getElementById('cred-password').value;
+    const statusEl = document.getElementById('cred-status');
+    if (!email) { showStatus(statusEl, 'Enter your email', 'error'); return; }
+    if (!password || password.length < 6) { showStatus(statusEl, 'Password must be at least 6 characters', 'error'); return; }
+    await window.api.credentials.save(credModalBot, email, password);
+    el.style.display = 'none';
+    await render('dashboard');
+  });
+}
+
+function openCredModal(botName, existingEmail = '') {
+  ensureCredModal();
+  credModalBot = botName;
+  document.getElementById('cred-modal-title').textContent = `Connect ${CRED_SITE_NAMES[botName]}`;
+  document.getElementById('cred-email').value = existingEmail;
+  document.getElementById('cred-password').value = '';
+  document.getElementById('cred-status').textContent = '';
+  document.getElementById('cred-modal').style.display = 'flex';
+  document.getElementById('cred-email').focus();
+}
+
 // ── Expiry banner ───────────────────────────────────────────────────────
 async function initExpiryBanner() {
   const license = await window.api.license.get();
@@ -934,9 +1118,8 @@ async function initExpiryBanner() {
 
 // ── Nav progress dots ────────────────────────────────────────────────────
 async function updateNavProgress() {
-  const [profile, creds, cvs, terms, license] = await Promise.all([
+  const [profile, cvs, terms, license] = await Promise.all([
     window.api.profile.get(),
-    window.api.credentials.get('reed'),
     window.api.cvs.get(),
     window.api.searchTerms.get(),
     window.api.license.get(),
@@ -944,7 +1127,6 @@ async function updateNavProgress() {
 
   const done = {
     personal: !!(profile.first_name && profile.email),
-    login:    !!(creds?.username),
     cvs:      cvs.length > 0,
     search:   terms.length > 0,
     license:  !!(license?.license_key),

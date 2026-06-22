@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, safeStorage, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, dialog, shell, Notification } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
@@ -6,6 +6,7 @@ const db = require('./src/db/database');
 const queueReader = require('./src/db/queueReader');
 const cvAnalyzer = require('./src/services/cvAnalyzer');
 const botManager = require('./src/services/botManager');
+const https = require('https');
 const { JOBBOT_BACKEND_URL } = require('./src/config');
 
 autoUpdater.setFeedURL({ provider: 'github', owner: 'seun888-del', repo: 'jobbot-app' });
@@ -36,9 +37,22 @@ app.whenReady().then(async () => {
   botManager.setLogHandler((bot, stream, text) => {
     mainWindow?.webContents.send('bot:log', { bot, stream, text });
   });
+  const BOT_DISPLAY = { reed: 'Reed Bot', scorer: 'Scorer Bot', linkedin: 'LinkedIn Bot', indeed: 'Indeed Bot', glassdoor: 'Glassdoor Bot', cvlibrary: 'CV-Library Bot' };
   botManager.setStatusHandler((bot, status) => {
     mainWindow?.webContents.send('bot:status', { bot, status });
+    if ((status === 'stopped' || status === 'error') && Notification.isSupported()) {
+      const label = BOT_DISPLAY[bot] || bot;
+      new Notification({
+        title: status === 'error' ? `${label} stopped with an error` : `${label} finished`,
+        body: status === 'error' ? 'Check the bot logs for details.' : 'The bot has completed its run.',
+        silent: false,
+      }).show();
+    }
   });
+
+  // Daily summary email — check every 30 minutes after 6 PM
+  setInterval(maybeSendDailySummary, 30 * 60 * 1000);
+  maybeSendDailySummary(); // also run immediately on launch in case it's past 6 PM
 
   // Check for updates silently — download in background, install on next quit
   if (app.isPackaged) {
@@ -60,6 +74,55 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   botManager.stopAll();
 });
+
+// ── Daily summary email ───────────────────────────────────────────────────
+function getSummaryStateFile() {
+  return path.join(app.getPath('userData'), 'daily_summary_state.json');
+}
+
+function getLastSentDate() {
+  try { return JSON.parse(fs.readFileSync(getSummaryStateFile(), 'utf8')).lastSent || ''; } catch { return ''; }
+}
+
+function markSentToday(date) {
+  fs.writeFileSync(getSummaryStateFile(), JSON.stringify({ lastSent: date }), 'utf8');
+}
+
+async function maybeSendDailySummary() {
+  try {
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (now.getHours() < 18) return; // only after 6 PM
+    if (getLastSentDate() === today) return; // already sent today
+
+    const license = db.getLicense();
+    if (!license?.license_key || !['active', 'trial'].includes(license?.status)) return;
+
+    const data = await queueReader.getDailySummaryData();
+    if (!data || (data.applied.length === 0 && data.failed.length === 0)) return;
+
+    const body = JSON.stringify({ license_key: license.license_key, date: today, ...data });
+    const url = new URL(`${JOBBOT_BACKEND_URL}/api/daily-summary`);
+    await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: url.hostname,
+        path: url.pathname,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      }, res => {
+        res.resume();
+        res.on('end', resolve);
+      });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+    markSentToday(today);
+    console.log('[summary] Daily summary email sent for', today);
+  } catch (err) {
+    console.error('[summary] Failed to send daily summary:', err.message);
+  }
+}
 
 // ── Profile ─────────────────────────────────────────────────────────────
 ipcMain.handle('profile:get', () => db.getProfile());
@@ -126,6 +189,11 @@ ipcMain.handle('credentials:get', (event, site) => {
   }
   return { username: row.username, password, session_valid: !!row.session_valid };
 });
+
+// ── Company blacklist ─────────────────────────────────────────────────────
+ipcMain.handle('blacklist:get', () => db.getCompanyBlacklist());
+ipcMain.handle('blacklist:add', (event, company) => db.addCompanyToBlacklist(company));
+ipcMain.handle('blacklist:remove', (event, id) => db.removeCompanyFromBlacklist(id));
 
 // ── Queue / dashboard ──────────────────────────────────────────────────────
 ipcMain.handle('queue:summary', () => queueReader.getQueueSummary());

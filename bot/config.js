@@ -47,12 +47,17 @@ const cfg = {
   JOB_SEARCHES: [],
   CVS: [],
   TITLE_BLOCKLIST: [],
+  COMPANY_BLOCKLIST: [],
   WORK_TYPE_PRIORITY: ['remote', 'hybrid', 'onsite'],
   LOCATION: 'United Kingdom',
   CONTRACT_TYPE: 'any',
   SKIP_EXTERNAL_SITES: true,
   MAX_APPLICATIONS_PER_DAY: 15,
   MIN_SCORE: 0,
+  SCHEDULE_ENABLED: false,
+  SCHEDULE_DAYS: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'],
+  SCHEDULE_START: 9,
+  SCHEDULE_END: 18,
 
   // Read profile.db (read-only) and populate the fields above.
   async init() {
@@ -106,8 +111,11 @@ const cfg = {
         eeoVeteran: profile.eeo_veteran || '',
       };
 
+      const blacklist = all('SELECT company FROM company_blacklist WHERE is_active = 1');
+
       cfg.JOB_SEARCHES = terms.map(t => t.term);
       cfg.TITLE_BLOCKLIST = excludes.map(e => e.keyword.toLowerCase());
+      cfg.COMPANY_BLOCKLIST = blacklist.map(b => b.company.toLowerCase());
 
       cfg.CVS = cvs.map(cv => ({
         id: cv.id,
@@ -128,6 +136,11 @@ const cfg = {
       cfg.SKIP_EXTERNAL_SITES = !!profile.skip_external_sites;
       cfg.MAX_APPLICATIONS_PER_DAY = profile.max_applications_per_day ?? 15;
       cfg.MIN_SCORE = profile.min_match_score ?? 0;
+
+      cfg.SCHEDULE_ENABLED = !!(prefs.schedule_enabled);
+      cfg.SCHEDULE_DAYS = (prefs.schedule_days || 'Mon,Tue,Wed,Thu,Fri').split(',');
+      cfg.SCHEDULE_START = prefs.schedule_start ?? 9;
+      cfg.SCHEDULE_END = prefs.schedule_end ?? 18;
 
       const fullName = `${cfg.APPLICANT.firstName} ${cfg.APPLICANT.lastName}`.trim();
       cfg.RESUME_FILENAME = fullName ? `${fullName} Resume.pdf` : 'Resume.pdf';

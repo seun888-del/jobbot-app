@@ -59,4 +59,42 @@ function getDailyApplications(days = 14) {
   }, []);
 }
 
-module.exports = { init, getQueueSummary, getRecentApplications, getDailyApplications };
+// Returns data for the daily summary email — today's applied/skipped/failed + pending count + top titles
+function getDailySummaryData() {
+  return withQueueDb(db => {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const applied = all(db, `
+        SELECT title, company FROM queue
+        WHERE status = 'applied' AND date(updated_at) = ?
+        ORDER BY updated_at DESC
+      `, [today]);
+      const skipped = all(db, `
+        SELECT title, company FROM queue
+        WHERE status = 'skipped' AND date(updated_at) = ?
+        ORDER BY updated_at DESC
+      `, [today]);
+      const failed = all(db, `
+        SELECT title, company FROM queue
+        WHERE status = 'apply_failed' AND date(updated_at) = ?
+        ORDER BY updated_at DESC
+      `, [today]);
+      const pendingRows = all(db, `SELECT COUNT(*) AS n FROM queue WHERE status IN ('pending','cv_ready')`, []);
+      const pending = pendingRows[0]?.n || 0;
+
+      const titleCounts = {};
+      for (const j of applied) {
+        const t = (j.title || '').split(' ').slice(0, 4).join(' ');
+        if (t) titleCounts[t] = (titleCounts[t] || 0) + 1;
+      }
+      const topTitles = Object.entries(titleCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([t]) => t);
+
+      return { applied, skipped, failed, pending, topTitles };
+    } catch (_) { return null; }
+  }, null);
+}
+
+module.exports = { init, getQueueSummary, getRecentApplications, getDailyApplications, getDailySummaryData };

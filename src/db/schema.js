@@ -90,4 +90,10 @@ CREATE TABLE IF NOT EXISTS license (
   email TEXT,
   expires_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS company_blacklist (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company TEXT NOT NULL UNIQUE,
+  is_active INTEGER DEFAULT 1
+);
 `;

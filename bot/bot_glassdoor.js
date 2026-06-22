@@ -22,6 +22,11 @@ function isRelevantTitle(title) {
   return !cfg.TITLE_BLOCKLIST.some(k => t.includes(k));
 }
 
+function isBlockedCompany(company) {
+  const c = (company || '').toLowerCase();
+  return cfg.COMPANY_BLOCKLIST.some(b => c.includes(b));
+}
+
 function detectWorkType(description) {
   const d = (description || '').toLowerCase();
   if (/\bfully remote\b|\b100%\s*remote\b|\bremote only\b|\bwork from home\b|\bwfh\b/.test(d)) return 'remote';
@@ -54,6 +59,7 @@ async function phase1_searchAndQueue(page) {
       if (queue.has(job.jobId)) { console.log(`  [Glassdoor Bot] Already queued: ${job.title}`); continue; }
       if (queue.wasApplied(job.jobId)) { console.log(`  [Glassdoor Bot] Already applied — skipping: ${job.title}`); continue; }
       if (!isRelevantTitle(job.title)) { console.log(`  [Glassdoor Bot] Title filter — skipping: ${job.title}`); continue; }
+      if (isBlockedCompany(job.company)) { console.log(`  [Glassdoor Bot] Company blocked — skipping: ${job.title} @ ${job.company}`); continue; }
       if (queue.hasCanonical(job.title, job.company)) {
         console.log(`  [Glassdoor Bot] Duplicate (cross-site) — skipping: ${job.title} @ ${job.company}`);
         continue;
