@@ -90,6 +90,11 @@ async function phase1_searchAndQueue(browser, reedPage) {
         continue;
       }
 
+      if (queue.wasAppliedToCompanyRecently(job.company)) {
+        console.log(`  [Reed Bot] Applied to ${job.company} in last 30 days — skipping: ${job.title}`);
+        continue;
+      }
+
       if (queue.hasCanonical(job.title, job.company)) {
         console.log(`  [Reed Bot] Duplicate (cross-site) — skipping: ${job.title} @ ${job.company}`);
         continue;
@@ -104,9 +109,9 @@ async function phase1_searchAndQueue(browser, reedPage) {
       try {
         const jobDetails = await reed.getJobDescription(reedPage, job);
 
-        if (!jobDetails.description || jobDetails.description.length < 50) {
-          console.log(`  [Reed Bot] Could not extract JD — skipping: ${job.title}`);
-          queue.add({ ...job, source: 'reed', status: 'skipped', reason: 'Could not extract JD' });
+        if (!jobDetails.description || jobDetails.description.trim().split(/\s+/).length < 80) {
+          console.log(`  [Reed Bot] Short/missing JD — skipping: ${job.title}`);
+          queue.add({ ...job, source: 'reed', status: 'skipped', reason: 'JD too short or missing' });
           continue;
         }
 

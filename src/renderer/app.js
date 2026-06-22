@@ -27,6 +27,8 @@ async function render(view) {
     case 'search':     fn = renderSearch; break;
     case 'license':    fn = renderLicense; break;
     case 'dashboard':  fn = renderDashboard; break;
+    case 'tracker':    fn = renderTracker; break;
+    case 'analytics':  fn = renderAnalytics; break;
     case 'help':       fn = renderHelp; break;
     default:           fn = renderPersonal;
   }
@@ -769,7 +771,7 @@ async function renderLicense() {
 }
 
 // ── Dashboard ────────────────────────────────────────────────────────────
-const BOT_LABELS = { reed: 'Reed Bot', scorer: 'Scorer Bot (AI)', linkedin: 'LinkedIn Bot', indeed: 'Indeed Bot', glassdoor: 'Glassdoor Bot', cvlibrary: 'CV-Library Bot' };
+const BOT_LABELS = { reed: 'Reed Bot', scorer: 'Scorer Bot (AI)', linkedin: 'LinkedIn Bot', indeed: 'Indeed Bot', glassdoor: 'Glassdoor Bot', cvlibrary: 'CV-Library Bot', totaljobs: 'Totaljobs Bot', cwjobs: 'CWJobs Bot' };
 
 let botLogUnsub = null;
 let botStatusUnsub = null;
@@ -842,11 +844,11 @@ function statusBadgeClass(status) {
   }
 }
 
-const CREDS_NEEDED = new Set(['reed', 'linkedin', 'indeed', 'glassdoor', 'cvlibrary']);
-const CRED_SITE_NAMES = { reed: 'Reed.co.uk', linkedin: 'LinkedIn', indeed: 'Indeed', glassdoor: 'Glassdoor', cvlibrary: 'CV-Library' };
+const CREDS_NEEDED = new Set(['reed', 'linkedin', 'indeed', 'glassdoor', 'cvlibrary', 'totaljobs', 'cwjobs']);
+const CRED_SITE_NAMES = { reed: 'Reed.co.uk', linkedin: 'LinkedIn', indeed: 'Indeed', glassdoor: 'Glassdoor', cvlibrary: 'CV-Library', totaljobs: 'Totaljobs', cwjobs: 'CWJobs' };
 
 async function renderDashboard() {
-  const [summary, recent, status, license, profile, dailyApps, reedCred, liCred, indeedCred, gdCred, cvlibCred] = await Promise.all([
+  const [summary, recent, status, license, profile, dailyApps, reedCred, liCred, indeedCred, gdCred, cvlibCred, tjCred, cwCred] = await Promise.all([
     window.api.queue.summary(),
     window.api.queue.recent(20),
     window.api.bot.status(),
@@ -858,11 +860,13 @@ async function renderDashboard() {
     window.api.credentials.get('indeed'),
     window.api.credentials.get('glassdoor'),
     window.api.credentials.get('cvlibrary'),
+    window.api.credentials.get('totaljobs'),
+    window.api.credentials.get('cwjobs'),
   ]);
   const isUS = (profile?.country || 'United Kingdom') === 'United States';
   dashboardHasLicense = !!(license?.license_key && (!license.expires_at || new Date(license.expires_at) > Date.now()));
 
-  const dashCreds = { reed: reedCred, linkedin: liCred, indeed: indeedCred, glassdoor: gdCred, cvlibrary: cvlibCred };
+  const dashCreds = { reed: reedCred, linkedin: liCred, indeed: indeedCred, glassdoor: gdCred, cvlibrary: cvlibCred, totaljobs: tjCred, cwjobs: cwCred };
   const counts = {};
   summary.forEach(row => { counts[row.status] = row.count; });
 
@@ -1034,6 +1038,234 @@ async function renderDashboard() {
   botStatusUnsub = window.api.bot.onStatus(({ bot, status: newStatus }) => {
     setBotControlsState(bot, newStatus);
   });
+}
+
+// ── Interview Tracker ─────────────────────────────────────────────────────
+const TRACKER_STAGES = ['applied', 'phone_screen', 'interview', 'offer', 'rejected', 'withdrawn'];
+const STAGE_LABELS = { applied: 'Applied', phone_screen: 'Phone Screen', interview: 'Interview', offer: 'Offer', rejected: 'Rejected', withdrawn: 'Withdrawn' };
+const STAGE_COLORS = { applied: '#6366f1', phone_screen: '#8b5cf6', interview: '#f59e0b', offer: '#10b981', rejected: '#ef4444', withdrawn: '#94a3b8' };
+
+async function renderTracker() {
+  content.innerHTML = `
+    <div class="page-header">
+      <h2>Interview Tracker</h2>
+      <p>Track every application from submission to offer. Syncs automatically from the bots.</p>
+    </div>
+    <div class="tracker-loading">Syncing from bots...</div>`;
+
+  let entries = [];
+  try {
+    entries = await window.api.tracker.sync();
+  } catch (_) {
+    entries = await window.api.tracker.get().catch(() => []);
+  }
+
+  const stageHtml = (id, currentStage) => `
+    <select class="tracker-stage-select" data-id="${id}" style="color:${STAGE_COLORS[currentStage] || '#94a3b8'}">
+      ${TRACKER_STAGES.map(s => `<option value="${s}" ${s === currentStage ? 'selected' : ''}>${STAGE_LABELS[s]}</option>`).join('')}
+    </select>`;
+
+  const SOURCE_BADGE = { reed: '#6366f1', linkedin: '#0077b5', indeed: '#2164f3', glassdoor: '#0caa41', cvlibrary: '#ff5c35', totaljobs: '#E84B2A', cwjobs: '#003057' };
+
+  content.innerHTML = `
+    <div class="page-header" style="display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <h2>Interview Tracker</h2>
+        <p>Track every application from submission to offer.</p>
+      </div>
+      <button class="secondary" id="sync-tracker">Sync now</button>
+    </div>
+
+    ${!entries.length ? `
+      <div class="card"><div class="empty-state">No applications tracked yet. The tracker syncs automatically once bots start applying.</div></div>
+    ` : `
+    <div class="card card-wide">
+      <table class="data-table tracker-table">
+        <thead>
+          <tr><th>Role</th><th>Company</th><th>Source</th><th>Applied</th><th>Stage</th><th>Notes</th><th></th></tr>
+        </thead>
+        <tbody>
+          ${entries.map(e => `
+            <tr data-id="${e.id}">
+              <td class="tracker-title">${e.title ? `<a href="${e.url || '#'}" class="tracker-link" data-url="${e.url || ''}">${e.title}</a>` : '—'}</td>
+              <td>${e.company || '—'}</td>
+              <td>${e.source ? `<span class="tracker-source-badge" style="background:${SOURCE_BADGE[e.source] || '#6366f1'}">${e.source}</span>` : '—'}</td>
+              <td>${e.applied_at ? e.applied_at.slice(0, 10) : '—'}</td>
+              <td>${stageHtml(e.id, e.stage || 'applied')}</td>
+              <td><input class="tracker-notes-input" data-id="${e.id}" value="${(e.notes || '').replace(/"/g, '&quot;')}" placeholder="Add notes..."></td>
+              <td><button class="tracker-delete-btn" data-id="${e.id}">×</button></td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`}
+  `;
+
+  document.getElementById('sync-tracker')?.addEventListener('click', async () => {
+    const btn = document.getElementById('sync-tracker');
+    btn.disabled = true;
+    btn.textContent = 'Syncing...';
+    await render('tracker');
+  });
+
+  content.querySelectorAll('.tracker-stage-select').forEach(sel => {
+    sel.addEventListener('change', async () => {
+      sel.style.color = STAGE_COLORS[sel.value] || '#94a3b8';
+      await window.api.tracker.update(Number(sel.dataset.id), { stage: sel.value });
+    });
+  });
+
+  content.querySelectorAll('.tracker-notes-input').forEach(inp => {
+    inp.addEventListener('blur', async () => {
+      await window.api.tracker.update(Number(inp.dataset.id), { notes: inp.value });
+    });
+    inp.addEventListener('keydown', async e => {
+      if (e.key === 'Enter') { inp.blur(); }
+    });
+  });
+
+  content.querySelectorAll('.tracker-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Remove this entry from the tracker?')) return;
+      await window.api.tracker.delete(Number(btn.dataset.id));
+      btn.closest('tr').remove();
+    });
+  });
+
+  content.querySelectorAll('.tracker-link').forEach(a => {
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      if (a.dataset.url) window.api.shell.openPath(a.dataset.url);
+    });
+  });
+}
+
+// ── Analytics ─────────────────────────────────────────────────────────────
+function buildAnalyticsGraph(daily30) {
+  if (!daily30 || daily30.length === 0) return '<div class="graph-empty">No applications in the past 30 days</div>';
+  const W = 560, H = 80, PAD = 4;
+  const maxCount = Math.max(...daily30.map(d => d.count), 1);
+  const barW = Math.floor((W - PAD * 2) / 30);
+  const days = [];
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400000);
+    const key = d.toISOString().slice(0, 10);
+    const found = daily30.find(r => r.day === key);
+    days.push({ key, count: found ? found.count : 0, label: d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) });
+  }
+  const bars = days.map((d, i) => {
+    const barH = Math.max(2, Math.round((d.count / maxCount) * (H - 20)));
+    const x = PAD + i * barW;
+    const y = H - barH - 16;
+    const isToday = i === 29;
+    return `<rect x="${x}" y="${y}" width="${barW - 1}" height="${barH}" class="graph-bar${isToday ? ' graph-bar-today' : ''}" rx="1">
+      <title>${d.label}: ${d.count}</title></rect>
+      ${d.count > 0 && barW > 10 ? `<text x="${x + (barW - 1) / 2}" y="${y - 2}" class="graph-label" text-anchor="middle">${d.count}</text>` : ''}`;
+  });
+  const labels = [days[0], days[14], days[29]].map(d => {
+    const i = days.indexOf(d);
+    return `<text x="${PAD + i * barW + (barW - 1) / 2}" y="${H}" class="graph-date" text-anchor="middle">${d.label}</text>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H + 4}" class="applications-graph" xmlns="http://www.w3.org/2000/svg">${bars.join('')}${labels.join('')}</svg>`;
+}
+
+async function renderAnalytics() {
+  content.innerHTML = `<div class="page-header"><h2>Analytics</h2><p>Application performance and patterns over time.</p></div><div style="padding:40px;color:#64748b">Loading...</div>`;
+
+  const data = await window.api.analytics.get();
+
+  if (!data) {
+    content.innerHTML = `<div class="page-header"><h2>Analytics</h2><p>No data yet — run the bots to see analytics.</p></div>`;
+    return;
+  }
+
+  const { totals, bySource, byCV, skipReasons, daily30, topCompanies, topTitles } = data;
+  const totalApplied = Number(totals.total_applied) || 0;
+  const totalSkipped = Number(totals.total_skipped) || 0;
+  const totalFailed  = Number(totals.total_failed) || 0;
+  const skipRate = totalApplied + totalSkipped > 0 ? Math.round((totalSkipped / (totalApplied + totalSkipped)) * 100) : 0;
+  const totalDaysActive = daily30.filter(d => d.count > 0).length || 1;
+  const avgPerDay = totalDaysActive > 0 ? (totalApplied / totalDaysActive).toFixed(1) : '0';
+  const topSource = bySource[0]?.source || '—';
+
+  const barRow = (label, count, max, color) => {
+    const pct = max > 0 ? Math.round((count / max) * 100) : 0;
+    return `<div class="analytics-bar-row">
+      <span class="analytics-bar-label">${label}</span>
+      <div class="analytics-bar-track"><div class="analytics-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+      <span class="analytics-bar-count">${count}</span>
+    </div>`;
+  };
+
+  const SOURCE_COLORS = { reed: '#6366f1', linkedin: '#0077b5', indeed: '#2164f3', glassdoor: '#0caa41', cvlibrary: '#ff5c35', totaljobs: '#E84B2A', cwjobs: '#003057' };
+  const maxSource = bySource[0]?.count || 1;
+  const maxCV     = byCV[0]?.count || 1;
+  const maxSkip   = skipReasons[0]?.count || 1;
+
+  content.innerHTML = `
+    <div class="page-header">
+      <h2>Analytics</h2>
+      <p>Application performance and patterns over time.</p>
+    </div>
+
+    <div class="summary-grid">
+      <div class="summary-card applied"><div class="num">${totalApplied}</div><div class="label">Total Applied</div></div>
+      <div class="summary-card pending"><div class="num">${avgPerDay}</div><div class="label">Avg / Active Day</div></div>
+      <div class="summary-card cv_ready"><div class="num">${topSource}</div><div class="label">Top Source</div></div>
+      <div class="summary-card skipped"><div class="num">${skipRate}%</div><div class="label">Skip Rate</div></div>
+      <div class="summary-card apply_failed"><div class="num">${totalFailed}</div><div class="label">Failed</div></div>
+    </div>
+
+    <div class="card card-wide">
+      <h3>Applications — Last 30 Days</h3>
+      ${buildAnalyticsGraph(daily30)}
+    </div>
+
+    <div class="analytics-grid">
+      <div class="card">
+        <h3>By Site</h3>
+        ${bySource.length
+          ? bySource.map(r => barRow(r.source, r.count, maxSource, SOURCE_COLORS[r.source] || '#6366f1')).join('')
+          : '<div class="empty-state">No data yet</div>'}
+      </div>
+      <div class="card">
+        <h3>By CV</h3>
+        ${byCV.length
+          ? byCV.map(r => barRow(r.cv_name || 'Unknown', r.count, maxCV, '#6366f1')).join('')
+          : '<div class="empty-state">No data yet</div>'}
+      </div>
+      <div class="card">
+        <h3>Why Jobs Were Skipped</h3>
+        ${skipReasons.length
+          ? skipReasons.map(r => barRow(r.reason, r.count, maxSkip, '#94a3b8')).join('')
+          : '<div class="empty-state">No data yet</div>'}
+      </div>
+    </div>
+
+    <div class="analytics-tables">
+      <div class="card">
+        <h3>Top Companies Applied To</h3>
+        <table class="data-table">
+          <thead><tr><th>Company</th><th>Applications</th></tr></thead>
+          <tbody>
+            ${topCompanies.length
+              ? topCompanies.map(r => `<tr><td>${r.company}</td><td>${r.count}</td></tr>`).join('')
+              : '<tr><td colspan="2"><div class="empty-state">No data yet</div></td></tr>'}
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Top Job Titles Applied To</h3>
+        <table class="data-table">
+          <thead><tr><th>Title</th><th>Count</th></tr></thead>
+          <tbody>
+            ${topTitles.length
+              ? topTitles.map(r => `<tr><td>${r.title}</td><td>${r.count}</td></tr>`).join('')
+              : '<tr><td colspan="2"><div class="empty-state">No data yet</div></td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
 }
 
 // ── Credential modal (shared across all bot cards) ───────────────────────

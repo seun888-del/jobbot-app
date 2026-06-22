@@ -80,6 +80,11 @@ async function phase1_searchAndQueue(liPage) {
         continue;
       }
 
+      if (queue.wasAppliedToCompanyRecently(job.company)) {
+        console.log(`  [LinkedIn Bot] Applied to ${job.company} in last 30 days — skipping: ${job.title}`);
+        continue;
+      }
+
       if (queue.hasCanonical(job.title, job.company)) {
         console.log(`  [LinkedIn Bot] Duplicate (cross-site) — skipping: ${job.title} @ ${job.company}`);
         continue;
@@ -88,9 +93,9 @@ async function phase1_searchAndQueue(liPage) {
       try {
         const jobDetails = await linkedin.getJobDescription(liPage, job);
 
-        if (!jobDetails.description || jobDetails.description.length < 50) {
-          console.log(`  [LinkedIn Bot] Could not extract JD — skipping: ${job.title}`);
-          queue.add({ ...job, source: 'linkedin', status: 'skipped', reason: 'Could not extract JD' });
+        if (!jobDetails.description || jobDetails.description.trim().split(/\s+/).length < 80) {
+          console.log(`  [LinkedIn Bot] Short/missing JD — skipping: ${job.title}`);
+          queue.add({ ...job, source: 'linkedin', status: 'skipped', reason: 'JD too short or missing' });
           continue;
         }
 

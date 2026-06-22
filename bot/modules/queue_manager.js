@@ -242,4 +242,32 @@ function requeueFailed(source) {
   return failed.length;
 }
 
-module.exports = { init, add, update, getByStatus, has, read, printStatus, markApplied, wasApplied, countAppliedToday, hasCanonical, requeueFailed };
+// Returns true if any applied job from the same company was submitted within
+// the past N days — prevents double-applying to the same employer.
+function wasAppliedToCompanyRecently(company, days = 30) {
+  if (!company) return false;
+  const nc = _normalise(company);
+  if (!nc) return false;
+  return withDb(db => {
+    try {
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - days);
+      const stmt = db.prepare("SELECT company FROM applied_jobs WHERE date(applied_at) >= ?");
+      stmt.bind([cutoff.toISOString().slice(0, 10)]);
+      while (stmt.step()) {
+        if (_normalise(stmt.getAsObject().company) === nc) { stmt.free(); return true; }
+      }
+      stmt.free();
+    } catch (_) {}
+    return false;
+  });
+}
+
+// Returns false for short or generic JDs.
+function isQualityJD(description, title) {
+  if (!description || description.trim().split(/\s+/).length < 80) return false;
+  if (/\b(various|multiple|several)\s+(roles?|positions?|vacancies?|openings?)/i.test(title || '')) return false;
+  return true;
+}
+
+module.exports = { init, add, update, getByStatus, has, read, printStatus, markApplied, wasApplied, countAppliedToday, hasCanonical, requeueFailed, wasAppliedToCompanyRecently, isQualityJD };

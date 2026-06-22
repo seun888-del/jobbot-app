@@ -97,4 +97,43 @@ function getDailySummaryData() {
   }, null);
 }
 
-module.exports = { init, getQueueSummary, getRecentApplications, getDailyApplications, getDailySummaryData };
+// Returns all applied jobs with queue metadata — used to sync the interview tracker
+function getAppliedJobsForSync() {
+  return withQueueDb(db => {
+    try {
+      return all(db, `
+        SELECT aj.job_id, aj.title, aj.company, aj.applied_at,
+               q.url, q.source, q.cv_name
+        FROM applied_jobs aj
+        LEFT JOIN queue q ON q.job_id = aj.job_id
+        ORDER BY aj.applied_at DESC LIMIT 500
+      `);
+    } catch (_) { return []; }
+  }, []);
+}
+
+// Comprehensive stats for the Analytics page
+function getAnalytics() {
+  return withQueueDb(db => {
+    try {
+      const totals = all(db, `
+        SELECT
+          SUM(CASE WHEN status='applied'                   THEN 1 ELSE 0 END) AS total_applied,
+          SUM(CASE WHEN status='skipped'                   THEN 1 ELSE 0 END) AS total_skipped,
+          SUM(CASE WHEN status IN('apply_failed','failed') THEN 1 ELSE 0 END) AS total_failed
+        FROM queue`);
+      const bySource    = all(db, `SELECT source, COUNT(*) AS count FROM queue WHERE status='applied' AND source IS NOT NULL GROUP BY source ORDER BY count DESC`);
+      const byCV        = all(db, `SELECT cv_name, COUNT(*) AS count FROM queue WHERE status='applied' AND cv_name IS NOT NULL GROUP BY cv_name ORDER BY count DESC`);
+      const skipReasons = all(db, `SELECT reason, COUNT(*) AS count FROM queue WHERE status='skipped' AND reason IS NOT NULL GROUP BY reason ORDER BY count DESC LIMIT 10`);
+      const daily30     = all(db, `SELECT date(applied_at) AS day, COUNT(*) AS count FROM applied_jobs WHERE applied_at >= date('now','-30 days') GROUP BY date(applied_at) ORDER BY day ASC`);
+      const topCompanies= all(db, `SELECT company, COUNT(*) AS count FROM applied_jobs WHERE company IS NOT NULL GROUP BY company ORDER BY count DESC LIMIT 10`);
+      const topTitles   = all(db, `SELECT title, COUNT(*) AS count FROM applied_jobs WHERE title IS NOT NULL GROUP BY title ORDER BY count DESC LIMIT 10`);
+      return {
+        totals: totals[0] || { total_applied: 0, total_skipped: 0, total_failed: 0 },
+        bySource, byCV, skipReasons, daily30, topCompanies, topTitles,
+      };
+    } catch (_) { return null; }
+  }, null);
+}
+
+module.exports = { init, getQueueSummary, getRecentApplications, getDailyApplications, getDailySummaryData, getAppliedJobsForSync, getAnalytics };

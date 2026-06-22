@@ -60,6 +60,10 @@ async function phase1_searchAndQueue(page) {
       if (queue.wasApplied(job.jobId)) { console.log(`  [Glassdoor Bot] Already applied — skipping: ${job.title}`); continue; }
       if (!isRelevantTitle(job.title)) { console.log(`  [Glassdoor Bot] Title filter — skipping: ${job.title}`); continue; }
       if (isBlockedCompany(job.company)) { console.log(`  [Glassdoor Bot] Company blocked — skipping: ${job.title} @ ${job.company}`); continue; }
+      if (queue.wasAppliedToCompanyRecently(job.company)) {
+        console.log(`  [Glassdoor Bot] Applied to ${job.company} in last 30 days — skipping: ${job.title}`);
+        continue;
+      }
       if (queue.hasCanonical(job.title, job.company)) {
         console.log(`  [Glassdoor Bot] Duplicate (cross-site) — skipping: ${job.title} @ ${job.company}`);
         continue;
@@ -68,8 +72,8 @@ async function phase1_searchAndQueue(page) {
       try {
         const jobDetails = await glassdoor.getJobDescription(page, job);
 
-        if (!jobDetails.description || jobDetails.description.length < 50) {
-          queue.add({ ...job, source: 'glassdoor', status: 'skipped', reason: 'Could not extract JD' });
+        if (!jobDetails.description || jobDetails.description.trim().split(/\s+/).length < 80) {
+          queue.add({ ...job, source: 'glassdoor', status: 'skipped', reason: 'JD too short or missing' });
           continue;
         }
         if (!jobDetails.hasEasyApply) {

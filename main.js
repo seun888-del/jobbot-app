@@ -37,7 +37,7 @@ app.whenReady().then(async () => {
   botManager.setLogHandler((bot, stream, text) => {
     mainWindow?.webContents.send('bot:log', { bot, stream, text });
   });
-  const BOT_DISPLAY = { reed: 'Reed Bot', scorer: 'Scorer Bot', linkedin: 'LinkedIn Bot', indeed: 'Indeed Bot', glassdoor: 'Glassdoor Bot', cvlibrary: 'CV-Library Bot' };
+  const BOT_DISPLAY = { reed: 'Reed Bot', scorer: 'Scorer Bot', linkedin: 'LinkedIn Bot', indeed: 'Indeed Bot', glassdoor: 'Glassdoor Bot', cvlibrary: 'CV-Library Bot', totaljobs: 'Totaljobs Bot', cwjobs: 'CWJobs Bot' };
   botManager.setStatusHandler((bot, status) => {
     mainWindow?.webContents.send('bot:status', { bot, status });
     if ((status === 'stopped' || status === 'error') && Notification.isSupported()) {
@@ -194,6 +194,19 @@ ipcMain.handle('credentials:get', (event, site) => {
 ipcMain.handle('blacklist:get', () => db.getCompanyBlacklist());
 ipcMain.handle('blacklist:add', (event, company) => db.addCompanyToBlacklist(company));
 ipcMain.handle('blacklist:remove', (event, id) => db.removeCompanyFromBlacklist(id));
+
+// ── Interview Tracker ─────────────────────────────────────────────────────
+ipcMain.handle('tracker:get', () => db.getTracker());
+ipcMain.handle('tracker:sync', async () => {
+  const jobs = await queueReader.getAppliedJobsForSync();
+  for (const job of jobs) db.syncTrackerEntry(job);
+  return db.getTracker();
+});
+ipcMain.handle('tracker:update', (event, id, fields) => db.updateTrackerEntry(id, fields));
+ipcMain.handle('tracker:delete', (event, id) => db.deleteTrackerEntry(id));
+
+// ── Analytics ────────────────────────────────────────────────────────────
+ipcMain.handle('analytics:get', () => queueReader.getAnalytics());
 
 // ── Queue / dashboard ──────────────────────────────────────────────────────
 ipcMain.handle('queue:summary', () => queueReader.getQueueSummary());

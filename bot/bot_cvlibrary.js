@@ -133,6 +133,11 @@ async function phase1_searchAndQueue(page) {
           continue;
         }
 
+        if (queue.wasAppliedToCompanyRecently(company)) {
+          console.log(`  [CV-Library Bot] Applied to ${company} in last 30 days — skipping: ${link.title}`);
+          continue;
+        }
+
         if (queue.hasCanonical(link.title, company)) {
           console.log(`  [CV-Library Bot] Duplicate (cross-site) — skipping: ${link.title} @ ${company}`);
           continue;
@@ -162,9 +167,9 @@ async function phase1_searchAndQueue(page) {
           el => el.innerText
         ).catch(() => '');
 
-        if (!description || description.length < 50) {
-          console.log(`  [CV-Library Bot] Could not extract JD — skipping: ${link.title}`);
-          queue.add({ jobId, title: link.title, company, url: link.url, source: 'cvlibrary', status: 'skipped', reason: 'No JD' });
+        if (!description || description.trim().split(/\s+/).length < 80) {
+          console.log(`  [CV-Library Bot] Short/missing JD — skipping: ${link.title}`);
+          queue.add({ jobId, title: link.title, company, url: link.url, source: 'cvlibrary', status: 'skipped', reason: 'JD too short or missing' });
           continue;
         }
 

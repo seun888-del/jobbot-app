@@ -13,6 +13,8 @@ const BOT_SCRIPTS = {
   indeed:     'bot_indeed.js',
   glassdoor:  'bot_glassdoor.js',
   cvlibrary:  'bot_cvlibrary.js',
+  totaljobs:  'bot_totaljobs.js',
+  cwjobs:     'bot_cwjobs.js',
 };
 
 const bots = {
@@ -22,6 +24,8 @@ const bots = {
   indeed:     { proc: null, status: 'stopped', stopping: false },
   glassdoor:  { proc: null, status: 'stopped', stopping: false },
   cvlibrary:  { proc: null, status: 'stopped', stopping: false },
+  totaljobs:  { proc: null, status: 'stopped', stopping: false },
+  cwjobs:     { proc: null, status: 'stopped', stopping: false },
 };
 
 let logHandler = null;
@@ -43,6 +47,8 @@ function getStatus() {
     indeed:     bots.indeed.status,
     glassdoor:  bots.glassdoor.status,
     cvlibrary:  bots.cvlibrary.status,
+    totaljobs:  bots.totaljobs.status,
+    cwjobs:     bots.cwjobs.status,
   };
 }
 
@@ -148,6 +154,30 @@ function start(botName, userDataPath) {
     }
     env.CVLIB_EMAIL = cred.username;
     env.CVLIB_PASS = safeStorage.decryptString(Buffer.from(cred.secret_enc, 'base64'));
+  }
+
+  if (botName === 'totaljobs') {
+    const cred = db.getCredential('totaljobs');
+    if (!cred || !cred.secret_enc) {
+      throw new Error('No Totaljobs credentials saved — connect your account on the Dashboard');
+    }
+    if (!safeStorage.isEncryptionAvailable()) {
+      throw new Error('OS-level credential encryption is not available on this machine');
+    }
+    env.TOTALJOBS_EMAIL = cred.username;
+    env.TOTALJOBS_PASS = safeStorage.decryptString(Buffer.from(cred.secret_enc, 'base64'));
+  }
+
+  if (botName === 'cwjobs') {
+    const cred = db.getCredential('cwjobs');
+    if (!cred || !cred.secret_enc) {
+      throw new Error('No CWJobs credentials saved — connect your account on the Dashboard');
+    }
+    if (!safeStorage.isEncryptionAvailable()) {
+      throw new Error('OS-level credential encryption is not available on this machine');
+    }
+    env.CWJOBS_EMAIL = cred.username;
+    env.CWJOBS_PASS = safeStorage.decryptString(Buffer.from(cred.secret_enc, 'base64'));
   }
 
   const scriptPath = path.join(BOT_DIR, BOT_SCRIPTS[botName]);

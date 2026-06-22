@@ -26,6 +26,15 @@ contextBridge.exposeInMainWorld('api', {
     add: (company) => ipcRenderer.invoke('blacklist:add', company),
     remove: (id) => ipcRenderer.invoke('blacklist:remove', id),
   },
+  tracker: {
+    get: () => ipcRenderer.invoke('tracker:get'),
+    sync: () => ipcRenderer.invoke('tracker:sync'),
+    update: (id, fields) => ipcRenderer.invoke('tracker:update', id, fields),
+    delete: (id) => ipcRenderer.invoke('tracker:delete', id),
+  },
+  analytics: {
+    get: () => ipcRenderer.invoke('analytics:get'),
+  },
   cvs: {
     get: () => ipcRenderer.invoke('cvs:get'),
     pickAndAdd: (label) => ipcRenderer.invoke('cvs:pickAndAdd', label),

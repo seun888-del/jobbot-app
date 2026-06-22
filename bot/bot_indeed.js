@@ -84,6 +84,11 @@ async function phase1_searchAndQueue(page) {
         continue;
       }
 
+      if (queue.wasAppliedToCompanyRecently(job.company)) {
+        console.log(`  [Indeed Bot] Applied to ${job.company} in last 30 days — skipping: ${job.title}`);
+        continue;
+      }
+
       if (queue.hasCanonical(job.title, job.company)) {
         console.log(`  [Indeed Bot] Duplicate (cross-site) — skipping: ${job.title} @ ${job.company}`);
         continue;
@@ -92,9 +97,9 @@ async function phase1_searchAndQueue(page) {
       try {
         const jobDetails = await indeed.getJobDescription(page, job);
 
-        if (!jobDetails.description || jobDetails.description.length < 50) {
-          console.log(`  [Indeed Bot] Could not extract JD — skipping: ${job.title}`);
-          queue.add({ ...job, source: 'indeed', status: 'skipped', reason: 'Could not extract JD' });
+        if (!jobDetails.description || jobDetails.description.trim().split(/\s+/).length < 80) {
+          console.log(`  [Indeed Bot] Short/missing JD — skipping: ${job.title}`);
+          queue.add({ ...job, source: 'indeed', status: 'skipped', reason: 'JD too short or missing' });
           continue;
         }
 

@@ -96,4 +96,18 @@ CREATE TABLE IF NOT EXISTS company_blacklist (
   company TEXT NOT NULL UNIQUE,
   is_active INTEGER DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS tracker (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id TEXT NOT NULL UNIQUE,
+  title TEXT,
+  company TEXT,
+  url TEXT,
+  source TEXT,
+  cv_name TEXT,
+  applied_at TEXT,
+  stage TEXT DEFAULT 'applied',
+  notes TEXT,
+  updated_at TEXT DEFAULT (datetime('now'))
+);
 `;

@@ -334,6 +334,33 @@ function removeCompanyFromBlacklist(id) {
   db.prepare('DELETE FROM company_blacklist WHERE id = ?').run([id]);
 }
 
+// ── Interview Tracker ─────────────────────────────────────────────────────
+function getTracker() {
+  return db.prepare('SELECT * FROM tracker ORDER BY applied_at DESC').all();
+}
+
+function syncTrackerEntry({ job_id, title, company, url, source, cv_name, applied_at }) {
+  if (!db.prepare('SELECT id FROM tracker WHERE job_id = ?').get([job_id])) {
+    db.prepare(
+      'INSERT INTO tracker (job_id, title, company, url, source, cv_name, applied_at) VALUES (?,?,?,?,?,?,?)'
+    ).run([job_id, title || null, company || null, url || null, source || null, cv_name || null, applied_at || null]);
+  }
+}
+
+function updateTrackerEntry(id, { stage, notes }) {
+  const sets = [];
+  const vals = [];
+  if (stage !== undefined) { sets.push('stage = ?'); vals.push(stage); }
+  if (notes !== undefined) { sets.push('notes = ?'); vals.push(notes); }
+  if (!sets.length) return;
+  sets.push("updated_at = datetime('now')");
+  db.prepare(`UPDATE tracker SET ${sets.join(', ')} WHERE id = ?`).run([...vals, id]);
+}
+
+function deleteTrackerEntry(id) {
+  db.prepare('DELETE FROM tracker WHERE id = ?').run([id]);
+}
+
 module.exports = {
   init,
   getDb,
@@ -360,4 +387,8 @@ module.exports = {
   getCompanyBlacklist,
   addCompanyToBlacklist,
   removeCompanyFromBlacklist,
+  getTracker,
+  syncTrackerEntry,
+  updateTrackerEntry,
+  deleteTrackerEntry,
 };
