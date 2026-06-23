@@ -69,7 +69,7 @@
     },
     "dmg": {
       "title": "JobBot",
-      "background": null,
+      "background": "assets/dmg-background.png",
       "contents": [
         {
           "x": 130,
