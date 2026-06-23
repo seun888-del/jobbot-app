@@ -60,16 +60,26 @@ async function ensureLoggedIn(page) {
     return;
   }
 
-  console.log('  [CWJobs Bot] Logging in...');
-  await page.fill('#email, input[name="email"], input[type="email"]', process.env.CWJOBS_EMAIL || '');
-  await page.fill('#password, input[name="password"], input[type="password"]', process.env.CWJOBS_PASS || '');
-  await page.click('button[type="submit"], input[type="submit"]');
-  await page.waitForLoadState('domcontentloaded');
-  await DELAY(2000);
+  // Pre-fill email with human-like typing then wait for user to enter password
+  try {
+    const emailEl = page.locator('#email, input[name="email"], input[type="email"]').first();
+    if (await emailEl.isVisible({ timeout: 5000 }).catch(() => false)) {
+      await emailEl.click();
+      await DELAY(400 + Math.random() * 300);
+      await emailEl.pressSequentially(process.env.CWJOBS_EMAIL || '', { delay: 55 + Math.random() * 65 });
+    }
+  } catch (_) {}
 
-  if (page.url().includes('/login')) {
-    throw new Error('CWJobs login failed — check credentials in Job Site Login');
+  console.log('  [CWJobs Bot] ⏳ Please enter your password and sign in (up to 5 minutes)...');
+
+  const deadline = Date.now() + 300000;
+  let loggedIn = false;
+  while (Date.now() < deadline) {
+    if (!page.url().includes('/login')) { loggedIn = true; break; }
+    await DELAY(3000);
   }
+
+  if (!loggedIn) throw new Error('CWJobs login timed out — check credentials in Job Site Login');
   console.log('  [CWJobs Bot] Logged in successfully');
 }
 

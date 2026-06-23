@@ -20,9 +20,10 @@ async function login(browser, email, password) {
   const emailInput = page.locator('input[type="email"]').filter({ visible: true }).first();
   await emailInput.waitFor({ state: 'visible', timeout: 15000 });
   await emailInput.click();
-  await emailInput.fill(email);
+  await DELAY(300 + Math.random() * 300);
+  await emailInput.pressSequentially(email, { delay: 55 + Math.random() * 65 });
   console.log('  [LinkedIn] Email filled.');
-  await DELAY(800);
+  await DELAY(600 + Math.random() * 400);
 
   const passInput = page.locator('input[type="password"]').filter({ visible: true }).first();
   await passInput.waitFor({ state: 'visible', timeout: 10000 });

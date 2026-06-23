@@ -50,24 +50,33 @@ function workTypePriority() {
 // ── Login ─────────────────────────────────────────────────────────────────
 async function ensureLoggedIn(page) {
   await page.goto(`${BASE_URL}/login`, { waitUntil: 'domcontentloaded' });
-  await DELAY(1500);
+  await DELAY(2000 + Math.random() * 1000);
 
-  // Already logged in?
   if (page.url().includes('/dashboard') || page.url().includes('/my-cv-library')) {
     console.log('  [CV-Library Bot] Session still valid');
     return;
   }
 
-  console.log('  [CV-Library Bot] Logging in...');
-  await page.fill('input[name="email"], input[type="email"]', process.env.CVLIB_EMAIL || '');
-  await page.fill('input[name="password"], input[type="password"]', process.env.CVLIB_PASS || '');
-  await page.click('button[type="submit"], input[type="submit"]');
-  await page.waitForLoadState('domcontentloaded');
-  await DELAY(2000);
+  // Pre-fill email with human-like typing then wait for user to enter password
+  try {
+    const emailEl = page.locator('input[name="email"], input[type="email"]').first();
+    if (await emailEl.isVisible({ timeout: 5000 }).catch(() => false)) {
+      await emailEl.click();
+      await DELAY(400 + Math.random() * 300);
+      await emailEl.pressSequentially(process.env.CVLIB_EMAIL || '', { delay: 55 + Math.random() * 65 });
+    }
+  } catch (_) {}
 
-  if (page.url().includes('login')) {
-    throw new Error('CV-Library login failed — check credentials in Job Site Login');
+  console.log('  [CV-Library Bot] ⏳ Please enter your password and sign in (up to 5 minutes)...');
+
+  const deadline = Date.now() + 300000;
+  let loggedIn = false;
+  while (Date.now() < deadline) {
+    if (!page.url().includes('/login')) { loggedIn = true; break; }
+    await DELAY(3000);
   }
+
+  if (!loggedIn) throw new Error('CV-Library login timed out — check credentials in Job Site Login');
   console.log('  [CV-Library Bot] Logged in successfully');
 }
 
