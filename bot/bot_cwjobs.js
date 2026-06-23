@@ -52,22 +52,22 @@ async function ensureLoggedIn(page) {
   await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
   await DELAY(2000 + Math.random() * 1000);
 
-  // Already logged in?
-  const loggedInEl = await page.$('a[href*="my-account"], a[href*="profile"], [data-testid="user-nav"], .user-nav, button[aria-label*="account"]').catch(() => null);
-  if (loggedInEl) {
-    console.log('  [CWJobs Bot] Session still valid');
-    return;
-  }
+  // Already logged in — look for user-only elements
+  const alreadyIn = await page.$('a[href*="my-account"], a[href*="/profile"], [data-testid="user-nav"], .user-nav__name').catch(() => null);
+  if (alreadyIn) { console.log('  [CWJobs Bot] Session still valid'); return; }
 
-  // Click the site's own Sign In link
+  // Try the site's own Sign In link; fall back to direct login URL
   const signInLink = await page.$('a[href*="login"], a[href*="sign-in"], a:has-text("Sign in"), a:has-text("Log in")').catch(() => null);
   if (signInLink) {
     await signInLink.click();
     await page.waitForLoadState('domcontentloaded');
     await DELAY(1500 + Math.random() * 500);
+  } else {
+    await page.goto(`${BASE_URL}/register/member/login`, { waitUntil: 'domcontentloaded' });
+    await DELAY(1500);
   }
 
-  // Pre-fill email with human-like typing then wait for user to enter password
+  // Pre-fill email then wait for user to enter password
   try {
     const emailEl = page.locator('#email, input[name="email"], input[type="email"]').first();
     if (await emailEl.isVisible({ timeout: 5000 }).catch(() => false)) {
@@ -77,13 +77,14 @@ async function ensureLoggedIn(page) {
     }
   } catch (_) {}
 
+  const loginPageUrl = page.url();
   console.log('  [CWJobs Bot] ⏳ Please enter your password and sign in (up to 5 minutes)...');
 
   const deadline = Date.now() + 300000;
   let loggedIn = false;
   while (Date.now() < deadline) {
     const u = page.url();
-    if (!u.includes('cwjobs.co.uk') || (!u.includes('login') && !u.includes('sign-in') && !u.includes('register'))) {
+    if (u !== loginPageUrl && u.includes('cwjobs.co.uk') && !u.includes('login') && !u.includes('sign-in') && !u.includes('register')) {
       loggedIn = true; break;
     }
     await DELAY(3000);

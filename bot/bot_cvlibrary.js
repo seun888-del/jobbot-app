@@ -46,26 +46,25 @@ function workTypePriority() {
 
 // ── Login ─────────────────────────────────────────────────────────────────
 async function ensureLoggedIn(page) {
-  // Go to homepage — avoids "out of date link" errors from stale direct login URLs
   await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
   await DELAY(2000 + Math.random() * 1000);
 
-  // Already logged in?
-  const loggedInEl = await page.$('a[href*="dashboard"], a[href*="my-cv-library"], .user-nav__name, [data-testid="user-menu"]').catch(() => null);
-  if (loggedInEl) {
-    console.log('  [CV-Library Bot] Session still valid');
-    return;
-  }
+  // Already logged in — look for user-only elements
+  const alreadyIn = await page.$('a[href*="/my-cv-library"], a[href*="/dashboard"], .user-nav__name, [data-testid="user-menu"]').catch(() => null);
+  if (alreadyIn) { console.log('  [CV-Library Bot] Session still valid'); return; }
 
-  // Click the site's own Sign In link to get the current login URL
+  // Try the site's own Sign In link; fall back to direct login URL
   const signInLink = await page.$('a[href*="login"], a:has-text("Sign in"), a:has-text("Log in"), a:has-text("Login")').catch(() => null);
   if (signInLink) {
     await signInLink.click();
     await page.waitForLoadState('domcontentloaded');
     await DELAY(1500 + Math.random() * 500);
+  } else {
+    await page.goto(`${BASE_URL}/login`, { waitUntil: 'domcontentloaded' });
+    await DELAY(1500);
   }
 
-  // Pre-fill email with human-like typing then wait for user to enter password
+  // Pre-fill email then wait for user to enter password
   try {
     const emailEl = page.locator('input[name="email"], input[type="email"]').first();
     if (await emailEl.isVisible({ timeout: 5000 }).catch(() => false)) {
@@ -75,13 +74,14 @@ async function ensureLoggedIn(page) {
     }
   } catch (_) {}
 
+  const loginPageUrl = page.url();
   console.log('  [CV-Library Bot] ⏳ Please enter your password and sign in (up to 5 minutes)...');
 
   const deadline = Date.now() + 300000;
   let loggedIn = false;
   while (Date.now() < deadline) {
     const u = page.url();
-    if (!u.includes('cv-library.co.uk') || (!u.includes('login') && !u.includes('sign-in'))) {
+    if (u !== loginPageUrl && u.includes('cv-library.co.uk') && !u.includes('login') && !u.includes('sign-in')) {
       loggedIn = true; break;
     }
     await DELAY(3000);
