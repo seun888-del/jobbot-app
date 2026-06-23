@@ -290,6 +290,7 @@ async function phase2_applyReadyCVs(page) {
 // ── Main ──────────────────────────────────────────────────────────────────
 (async () => {
   await cfg.init();
+  await queue.init(process.env.JOBBOT_USERDATA);
 
   const browser = await chromium.launch({
     headless: false,
