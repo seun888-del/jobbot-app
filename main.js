@@ -318,13 +318,6 @@ ipcMain.handle('shell:openPath', (event, filePath) => shell.openPath(filePath));
 const connectProcs = new Map();   // site → ChildProcess
 const connectPorts = new Map();   // site → CDP port (while Chrome is open)
 
-// The connect window must use the SAME proxy as the bot so the cf_clearance
-// cookie is issued for the proxy IP, not the home IP.
-// __PROXY_URL__ is replaced at build time by GitHub Actions (same as browser_launcher.js).
-const _CONNECT_BUILTIN_PROXY = '__PROXY_URL__';
-const CONNECT_PROXY_URL = process.env.JOBBOT_PROXY_URL ||
-  (_CONNECT_BUILTIN_PROXY.startsWith('__') ? '' : _CONNECT_BUILTIN_PROXY);
-
 const SITE_DEBUG_PORTS = {
   reed: 9222, linkedin: 9223, indeed: 9224,
   glassdoor: 9225, cvlibrary: 9226, totaljobs: 9227, cwjobs: 9228,
@@ -429,22 +422,6 @@ ipcMain.handle('site:connect', async (event, { site, loginUrl }) => {
     // into both sites in the same Chrome window.
     const extraUrls = site === 'glassdoor' ? ['https://uk.indeed.com/account/login'] : [];
 
-    // Pass the proxy to Chrome so cf_clearance is issued for the proxy IP,
-    // not the home IP. Without this Cloudflare re-challenges every bot run.
-    const proxyArgs = [];
-    if (CONNECT_PROXY_URL) {
-      try {
-        const pu = new URL(CONNECT_PROXY_URL);
-        proxyArgs.push(`--proxy-server=${pu.protocol}//${pu.hostname}:${pu.port}`);
-        if (pu.username) {
-          // Chrome requires proxy auth via --proxy-bypass-list or user:pass@ prefix
-          // For authenticated proxies use the host:port form and let Chrome prompt,
-          // or embed credentials in the server string (supported by most proxy types).
-          proxyArgs[0] = `--proxy-server=${pu.protocol}//${decodeURIComponent(pu.username)}:${decodeURIComponent(pu.password)}@${pu.hostname}:${pu.port}`;
-        }
-      } catch (_) {}
-    }
-
     const proc = execFile(browserPath, [
       `--user-data-dir=${profileDir}`,
       `--remote-debugging-port=${port}`,
@@ -454,7 +431,6 @@ ipcMain.handle('site:connect', async (event, { site, loginUrl }) => {
       '--disable-notifications',
       '--disable-session-crashed-bubble',
       '--disable-infobars',
-      ...proxyArgs,
       ...extraUrls,
       loginUrl,
     ]);
