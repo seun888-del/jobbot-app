@@ -69,14 +69,13 @@
           ]
         }
       ],
-      "icon": "assets/icon.icns",
+      "icon": "assets/icon.png",
       "category": "public.app-category.productivity",
       "hardenedRuntime": true,
       "gatekeeperAssess": false
     },
     "dmg": {
       "title": "JobBot",
-      "background": "assets/dmg-background.png",
       "contents": [
         {
           "x": 130,
