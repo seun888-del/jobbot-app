@@ -82,6 +82,9 @@ jobs:
           sed -i '' 's|__PROXY_URL__|${{ secrets.PROXY_URL }}|g' main.js
           sed -i '' 's|__GROQ_KEY__|${{ secrets.GROQ_KEY }}|g' src/services/llm.js
 
+      - name: Ensure icon is 512x512
+        run: sips -z 512 512 assets/icon.png --out assets/icon.png
+
       - name: Build Mac DMG
         run: npm run dist:mac
         env:
