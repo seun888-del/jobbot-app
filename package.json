@@ -1,6 +1,6 @@
 {
   "name": "job-bot-app",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "Desktop app for automated job search and application",
   "main": "main.js",
   "private": true,
@@ -30,7 +30,11 @@
   "build": {
     "appId": "com.femimerit.jobbotapp",
     "productName": "JobBot-AI",
-    "publish": null,
+    "publish": {
+      "provider": "github",
+      "owner": "seun888-del",
+      "repo": "jobbot-app"
+    },
     "asar": false,
     "directories": {
       "output": "dist"
