@@ -8,7 +8,7 @@
 
 const { JOBBOT_BACKEND_URL } = require('../config');
 
-const GROQ_KEY   = process.env.GROQ_API_KEY  || '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';
+const GROQ_KEY   = process.env.GROQ_API_KEY  || '__GROQ_KEY__';
 const GROQ_MODEL = process.env.GROQ_MODEL    || 'llama-3.1-8b-instant';
 
 const ANTHROPIC_KEY  = process.env.ANTHROPIC_API_KEY;

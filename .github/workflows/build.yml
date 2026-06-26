@@ -38,6 +38,8 @@ jobs:
           [System.IO.File]::WriteAllText((Resolve-Path $f), ((Get-Content -Raw $f) -replace '__PROXY_URL__', '${{ secrets.PROXY_URL }}'), $utf8)
           $f = "main.js"
           [System.IO.File]::WriteAllText((Resolve-Path $f), ((Get-Content -Raw $f) -replace '__PROXY_URL__', '${{ secrets.PROXY_URL }}'), $utf8)
+          $f = "src\services\llm.js"
+          [System.IO.File]::WriteAllText((Resolve-Path $f), ((Get-Content -Raw $f) -replace '__GROQ_KEY__', '${{ secrets.GROQ_KEY }}'), $utf8)
         shell: pwsh
 
       - name: Build Windows installer
@@ -92,6 +94,7 @@ jobs:
           sed -i '' 's/__CAPSOLVER_KEY__/${{ secrets.CAPSOLVER_KEY }}/g' bot/config.js
           sed -i '' 's|__PROXY_URL__|${{ secrets.PROXY_URL }}|g' bot/modules/browser_launcher.js
           sed -i '' 's|__PROXY_URL__|${{ secrets.PROXY_URL }}|g' main.js
+          sed -i '' 's|__GROQ_KEY__|${{ secrets.GROQ_KEY }}|g' src/services/llm.js
 
       - name: Build Mac DMG
         run: npm run dist:mac
