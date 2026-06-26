@@ -47,35 +47,44 @@ async function launchPersistentContext(profileDir, extraOpts = {}) {
   const sharedOpts = {
     headless: false,
     args: BASE_ARGS,
-    // No userAgent override — let real Chrome send its authentic UA
     viewport: { width: 1366, height: 768 },
     ...buildProxyOpts(),
     ...extraOpts,
   };
 
+  // Must use the same real Chrome that the user logged in with.
+  // Bundled Chromium cannot read Chrome's DPAPI-encrypted cookies and will
+  // always appear as a new session to every site — never fall back to it.
   let ctx;
+  let usedChannel;
   for (const channel of ['chrome', 'msedge']) {
     try {
       ctx = await chromium.launchPersistentContext(profileDir, { channel, ...sharedOpts });
-      console.log(`  [Browser] Launched real ${channel} with persistent profile`);
+      usedChannel = channel;
+      console.log(`  [Browser] Launched ${channel} with stored session (profile: ${profileDir})`);
       break;
     } catch (_) {}
   }
 
   if (!ctx) {
-    console.log('  [Browser] Using bundled Chromium (real browser not found)');
-    ctx = await chromium.launchPersistentContext(profileDir, sharedOpts);
+    throw new Error(
+      'Chrome or Edge not found on this computer.\n' +
+      'Please install Google Chrome, then click "Connect account" to log in before starting the bot.'
+    );
   }
 
-  // Inject a realistic browser fingerprint (canvas, WebGL, UA, screen, fonts)
+  // Inject a realistic browser fingerprint (canvas, WebGL, UA, screen, fonts).
+  // locales: ['en-GB'] ensures navigator.language matches a UK residential IP.
   if (FingerprintGenerator && FingerprintInjector) {
     try {
-      const fp = new FingerprintGenerator().getFingerprint({ browsers: ['chrome'], operatingSystems: ['windows'], devices: ['desktop'] });
+      const fp = new FingerprintGenerator().getFingerprint({
+        browsers: ['chrome'],
+        operatingSystems: ['windows'],
+        devices: ['desktop'],
+        locales: ['en-GB'],
+      });
       await new FingerprintInjector().attachFingerprintToPlaywright(ctx, fp);
-      console.log('  [Browser] Fingerprint injected');
-    } catch (e) {
-      console.warn('  [Browser] Fingerprint injection skipped:', e.message);
-    }
+    } catch (_) {}
   }
 
   return ctx;
@@ -83,15 +92,24 @@ async function launchPersistentContext(profileDir, extraOpts = {}) {
 
 // Wait for a Cloudflare challenge to auto-solve before the bot reads the page.
 // CF's JS challenge auto-solves within ~5s when running real Chrome with stealth.
-async function waitForCloudflareSolve(page, { maxWaitMs = 30000 } = {}) {
+async function waitForCloudflareSolve(page, { maxWaitMs = 300000 } = {}) {
   const pageStatus = () => page.evaluate(() => {
     const t = (document.title || '').toLowerCase();
-    const b = (document.body?.innerText || '').substring(0, 800).toLowerCase();
-    const isCfChallenge = t.includes('just a moment') || t.includes('attention required') ||
+    const b = (document.body?.innerText || '').substring(0, 1200).toLowerCase();
+    const isCfChallenge =
+      // Cloudflare passive challenges
+      t.includes('just a moment') || t.includes('attention required') ||
       b.includes('checking your browser') || b.includes('checking if the site') ||
       b.includes('enable javascript and cookies') ||
       b.includes('ddos-guard') || b.includes('one more step') ||
-      b.includes('please wait while we verify');
+      b.includes('please wait while we verify') ||
+      // Indeed / site-specific human verification challenges
+      b.includes('let us know you') || b.includes('are you a robot') ||
+      b.includes('verify you are human') || b.includes('verify that you are') ||
+      b.includes('human verification') || b.includes('bot verification') ||
+      b.includes('security check') || b.includes('prove you') ||
+      t.includes('human verification') || t.includes('security check') ||
+      t.includes('are you a robot');
     const isHardBlock = t.includes('blocked') || t.includes('access denied') ||
       t.includes('403') || t.includes('forbidden') ||
       b.includes('you triggered a security action') || b.includes('your ip has been blocked') ||
@@ -110,16 +128,17 @@ async function waitForCloudflareSolve(page, { maxWaitMs = 30000 } = {}) {
     }
     if (isCfChallenge) {
       if (!challenged) {
-        console.log('  [Browser] Cloudflare challenge detected — waiting for auto-solve...');
+        console.log('  [Browser] ⚠️  Human verification challenge detected — please complete it in the browser window.');
+        console.log('  [Browser] Waiting up to 5 minutes for you to pass the check...');
         challenged = true;
       }
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 3000));
     } else {
-      if (challenged) console.log('  [Browser] Cloudflare challenge passed');
+      if (challenged) console.log('  [Browser] ✓ Verification passed — continuing.');
       return true;
     }
   }
-  console.warn('  [Browser] Cloudflare challenge did not auto-solve in time');
+  console.warn('  [Browser] Verification challenge did not complete in time — skipping.');
   return false;
 }
 
@@ -142,4 +161,17 @@ async function humanWarmup(page) {
   } catch (_) {}
 }
 
-module.exports = { launchPersistentContext, humanWarmup, waitForCloudflareSolve };
+// Attaches Playwright to the Chrome window the user logged in with via CDP.
+// The bot controls that exact Chrome — same session, same cookies, no new launch.
+async function connectToRunningChrome(port) {
+  const { chromium: plainChromium } = require('playwright');
+  const endpoint = `http://127.0.0.1:${port}`;
+  console.log(`  [Browser] Attaching to Chrome on port ${port}...`);
+  const browser = await plainChromium.connectOverCDP(endpoint);
+  const contexts = browser.contexts();
+  const ctx = contexts.length > 0 ? contexts[0] : await browser.newContext();
+  console.log(`  [Browser] Attached to live Chrome session`);
+  return ctx;
+}
+
+module.exports = { launchPersistentContext, connectToRunningChrome, humanWarmup, waitForCloudflareSolve };

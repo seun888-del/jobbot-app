@@ -503,6 +503,30 @@ button.secondary:disabled { background: var(--surface-alt); color: var(--text-fa
 .btn-text-muted { background: none; border: none; color: var(--text-faint); font-size: 12px; font-weight: 500; cursor: pointer; padding: 4px 6px; font-family: inherit; text-decoration: underline; text-underline-offset: 2px; margin-top: 0; }
 .btn-text-muted:hover { color: var(--text-muted); }
 
+.btn-connect {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  color: var(--primary);
+  border: 1.5px solid var(--primary);
+  border-radius: 20px;
+  padding: 5px 13px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  letter-spacing: 0.01em;
+  transition: background 150ms ease, color 150ms ease;
+  margin-top: 0;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+.btn-connect::before { content: '⚡'; font-size: 11px; }
+.btn-connect:hover { background: var(--primary-soft); opacity: 1; }
+.btn-connect:active { background: #e0e7ff; }
+.btn-connect:disabled { opacity: 0.4; cursor: default; }
+
 /* ── Credential modal ──────────────────────────────────────────────────── */
 .cred-modal-overlay { position: fixed; inset: 0; background: rgba(15,23,42,0.45); display: flex; align-items: center; justify-content: center; z-index: 1000; backdrop-filter: blur(2px); }
 .cred-modal-card { background: var(--surface); border-radius: 14px; padding: 32px 28px; width: 380px; max-width: calc(100vw - 48px); box-shadow: 0 24px 64px rgba(15,23,42,0.22); }
@@ -558,12 +582,11 @@ button.secondary:disabled { background: var(--surface-alt); color: var(--text-fa
 .welcome-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.7);
+  background: rgba(15, 23, 42, 0.75);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1000;
-  backdrop-filter: blur(4px);
   animation: overlay-fade-in 0.2s ease;
 }
 @keyframes overlay-fade-in {

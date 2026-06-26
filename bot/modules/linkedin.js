@@ -36,27 +36,19 @@ async function login(browser, email, password) {
   await page.getByRole('button', { name: 'Sign in', exact: true }).first().click();
   await DELAY(7000);
 
-  // Wait up to 5 minutes — covers CAPTCHA/checkpoint requiring manual action
-  const deadline = Date.now() + 300000;
-  let loggedIn = false;
-  while (Date.now() < deadline) {
+  // Wait indefinitely — auto-solve any CAPTCHA, never give up
+  console.log('  [LinkedIn] Waiting for login...');
+  while (true) {
     const u = page.url();
     if (u.includes('feed') || u.includes('mynetwork') || (await page.$('.global-nav').catch(() => null))) {
-      loggedIn = true;
+      console.log('  [LinkedIn] Logged in successfully.');
       break;
     }
     if (u.includes('checkpoint') || u.includes('challenge') || u.includes('captcha') || u.includes('security-check')) {
       console.log('  [LinkedIn] ⚠️  Security check — attempting auto-solve...');
-      await captcha.autoSolve(page).catch(() => {});
     }
+    await captcha.autoSolve(page).catch(() => {});
     await DELAY(5000);
-  }
-
-  if (loggedIn) {
-    console.log('  [LinkedIn] Logged in successfully.');
-  } else {
-    console.log('  [LinkedIn] Login failed after 5 minutes. URL:', page.url());
-    await page.screenshot({ path: path.join(SSDIR, 'li_login_issue.png') });
   }
 
   return page;
@@ -75,7 +67,7 @@ async function searchJobs(page, searchTerm, limit = 10) {
 
   console.log(`\n  [LinkedIn] Searching: "${searchTerm}" (remote+hybrid, Easy Apply)`);
   await page.goto(url, { waitUntil: 'load', timeout: 60000 });
-  await DELAY(2000);
+  await DELAY(3000);
 
   for (let i = 0; i < 3; i++) {
     await page.evaluate(() => window.scrollBy(0, 800));
@@ -83,35 +75,43 @@ async function searchJobs(page, searchTerm, limit = 10) {
   }
 
   const jobs = await page.evaluate((lim) => {
-    const cardSelectors = [
-      'li.jobs-search-results__list-item',
-      '.job-card-container',
-      '[data-job-id]',
-      'li[class*="scaffold-layout__list-item"]',
-      'div[class*="job-card"]',
-    ];
-    let cards = [];
-    for (const sel of cardSelectors) {
-      cards = Array.from(document.querySelectorAll(sel));
-      if (cards.length > 0) break;
+    // Use job view links as the primary anchor — /jobs/view/NNN is stable across UI changes.
+    // LinkedIn class names change too frequently to rely on as primary selectors.
+    const seen = new Set();
+    const entries = [];
+    for (const a of document.querySelectorAll('a[href*="/jobs/view/"]')) {
+      const href = a.getAttribute('href') || '';
+      const idMatch = href.match(/\/jobs\/view\/(\d+)/);
+      if (!idMatch) continue;
+      const jobId = idMatch[1];
+      if (seen.has(jobId)) continue;  // deduplicate by job ID
+      seen.add(jobId);
+      const card = a.closest('li') || a.closest('[data-job-id]') || a.parentElement;
+      entries.push({ a, card, jobId, href });
     }
-    cards = cards.slice(0, lim);
 
-    return cards.map(card => {
-      const titleEl   = card.querySelector('.job-card-list__title--link, .job-card-list__title, .job-card-container__link, a[class*="job-card"]');
-      const companyEl = card.querySelector('.job-card-container__company-name, .artdeco-entity-lockup__subtitle, [class*="company-name"]');
-      const linkEl    = card.querySelector('a[href*="/jobs/view/"]');
-      const jobId     = card.getAttribute('data-job-id') || card.getAttribute('data-entity-urn') || '';
-      return {
-        title:   titleEl   ? titleEl.innerText.trim()   : 'Unknown',
-        company: companyEl ? companyEl.innerText.trim() : 'Unknown',
-        url:     linkEl    ? 'https://www.linkedin.com' + linkEl.getAttribute('href').split('?')[0] : '',
-        jobId:   jobId.replace(/\D/g, ''),
-      };
-    }).filter(j => j.url);
+    return entries.slice(0, lim).map(({ a, card, jobId, href }) => {
+      const fullUrl = href.startsWith('http')
+        ? href.split('?')[0]
+        : 'https://www.linkedin.com' + href.split('?')[0];
+
+      const titleEl   = card && card.querySelector('[class*="title"]');
+      const companyEl = card && card.querySelector(
+        '[class*="company-name"], [class*="subtitle"], .artdeco-entity-lockup__subtitle'
+      );
+      const title   = (titleEl   ? titleEl.innerText   : a.innerText || 'Unknown').trim();
+      const company = (companyEl ? companyEl.innerText : 'Unknown').trim().split('\n')[0];
+
+      return { title, company, url: fullUrl, jobId };
+    }).filter(j => j.url && j.jobId);
   }, limit);
 
   console.log(`  [LinkedIn] Found ${jobs.length} jobs for "${searchTerm}"`);
+  if (jobs.length === 0) {
+    const currentUrl = page.url();
+    console.log(`  [LinkedIn] 0 jobs found. URL: ${currentUrl}`);
+    await page.screenshot({ path: require('path').join(SSDIR, 'li_search_empty.png') }).catch(() => {});
+  }
   return jobs;
 }
 
@@ -394,27 +394,71 @@ function buildTextareaAnswer(label, job) {
 
 async function fillContactFields(page) {
   const { firstName, lastName, phone, email, location } = cfg.APPLICANT;
-  const fills = [
-    { sel: 'input[id*="firstName"], input[name*="firstName"]',                                val: firstName },
-    { sel: 'input[id*="lastName"], input[name*="lastName"]',                                  val: lastName  },
-    { sel: 'input[id*="phone"], input[name*="phone"]',                                        val: phone     },
-    { sel: 'input[id*="email"], input[name*="email"]',                                        val: email     },
-    { sel: 'input[id*="city"], input[name*="city"], input[placeholder*="ity" i]',             val: 'London'  },
-    { sel: 'input[id*="location"], input[name*="location"], input[placeholder*="ocation" i]', val: location  },
+  const simpleFields = [
+    { sel: 'input[id*="firstName"], input[name*="firstName"]', val: firstName },
+    { sel: 'input[id*="lastName"],  input[name*="lastName"]',  val: lastName  },
+    { sel: 'input[id*="phone"],     input[name*="phone"]',     val: phone     },
+    { sel: 'input[id*="email"],     input[name*="email"]',     val: email     },
   ];
-  for (const { sel, val } of fills) {
+  for (const { sel, val } of simpleFields) {
+    if (!val) continue;
     try {
       const el = await page.$(sel);
-      if (el && await el.isVisible()) {
-        const current = await el.inputValue();
-        if (!current) await el.fill(val);
-      }
+      if (!el || !(await el.isVisible().catch(() => false))) continue;
+      await el.click({ clickCount: 3 }).catch(() => {});
+      await DELAY(80);
+      await el.fill(val).catch(() => {});
+      await DELAY(150);
     } catch (_) {}
+  }
+
+  // Location/city — LinkedIn Easy Apply shows an autocomplete dropdown when you type.
+  // Must select a suggestion or the field stays invalid and the step can't advance.
+  if (location) {
+    const locSels = [
+      'input[id*="city"], input[name*="city"], input[placeholder*="ity" i]',
+      'input[id*="location"], input[name*="location"], input[placeholder*="ocation" i]',
+    ];
+    for (const sel of locSels) {
+      try {
+        const el = await page.$(sel);
+        if (!el || !(await el.isVisible().catch(() => false))) continue;
+        await el.click({ clickCount: 3 }).catch(() => {});
+        await DELAY(100);
+        await el.fill(location).catch(() => {});
+        await DELAY(1200);
+        const hasSuggestion = await page.evaluate(() => {
+          const opt = document.querySelector(
+            '[role="listbox"] [role="option"], .basic-typeahead__triggered-content li, [class*="typeahead"] li'
+          );
+          return !!(opt && opt.offsetParent !== null);
+        });
+        if (hasSuggestion) {
+          await page.keyboard.press('ArrowDown');
+          await DELAY(200);
+          await page.keyboard.press('Enter');
+          await DELAY(400);
+          console.log(`  [LinkedIn] Location autocomplete selected: ${location}`);
+        }
+        break;
+      } catch (_) {}
+    }
   }
 }
 
 async function uploadResume(page, resumePath) {
+  if (!resumePath || !fs.existsSync(resumePath)) return false;
   try {
+    // When LinkedIn pre-attaches a profile CV there's a "Change" button — use it to swap in the tailored CV
+    const changeBtn = await page.$(
+      'button:has-text("Change"), button:has-text("Replace"), [aria-label*="Change resume" i], [aria-label*="Replace resume" i]'
+    );
+    if (changeBtn && await changeBtn.isVisible().catch(() => false)) {
+      const [chooser] = await Promise.all([page.waitForFileChooser({ timeout: 5000 }), changeBtn.click()]);
+      await chooser.setFiles(resumePath);
+      await DELAY(2000);
+      return true;
+    }
     const fileInput = await page.$('input[type="file"]');
     if (fileInput) { await fileInput.setInputFiles(resumePath); await DELAY(2000); return true; }
     const uploadBtn = await page.$('button:has-text("Upload resume"), label:has-text("Upload resume"), [aria-label*="upload" i]');
@@ -429,12 +473,15 @@ async function uploadResume(page, resumePath) {
 }
 
 async function answerScreeningQuestions(page, job) {
-  await _answerRadios(page, job);
-  await _answerCustomDropdowns(page, job);
-  await _answerSelects(page, job);
-  await _answerTextInputs(page, job);
-  await _answerTextareas(page, job);
-  await _answerCheckboxes(page);
+  // Scope all filling to inside the modal — prevents the bot accidentally filling
+  // the LinkedIn search bar or other page-level inputs behind the overlay.
+  const modal = await page.$('.jobs-easy-apply-modal, [data-test-modal], [role="dialog"]') || page;
+  await _answerRadios(modal, job);
+  await _answerCustomDropdowns(modal, job);
+  await _answerSelects(modal, job);
+  await _answerTextInputs(modal, job);
+  await _answerTextareas(modal, job);
+  await _answerCheckboxes(modal);
 }
 
 // ── SHARED: resolve which option text to pick for a labelled dropdown ─────
@@ -497,6 +544,22 @@ function resolveDropdownChoice(question, options, job) {
               options[options.length - 1];
     return m || null;
   }
+  if (/notice period|how.*soon.*start|when.*available.*start|available.*notice|notice.*required/i.test(q)) {
+    const avMap = {
+      'immediately': /immediate|asap|now|^0\s*|no notice|straight away/,
+      '1week':       /^1\s*week|one\s*week/,
+      '2weeks':      /^2\s*week|two\s*week/,
+      '1month':      /^1\s*month|one\s*month/,
+      '2months':     /^2\s*month|two\s*month/,
+      '3months':     /^3\s*month|three\s*month/,
+    };
+    const avKey = cfg.APPLICANT.availability || 'immediately';
+    const pattern = avMap[avKey];
+    return options.find(o => pattern && pattern.test(o.text)) || options[0] || null;
+  }
+  if (/prefer.*work.*home|work.*from.*home.*prefer|remote.*prefer|prefer.*remote/i.test(q)) {
+    return options.find(o => /^yes|remote|home/i.test(o.text)) || options[0] || null;
+  }
   if (/driving.*licen|licen.*driving|valid.*licen/i.test(q)) {
     return cfg.APPLICANT.drivingLicence
       ? options.find(o => /^yes/.test(o.text))
@@ -523,7 +586,7 @@ function resolveDropdownChoice(question, options, job) {
 // ── CUSTOM DROPDOWNS (LinkedIn artdeco button+listbox components) ─────────
 // LinkedIn uses button[aria-haspopup="listbox"] instead of native <select>
 // for many of its newer form builder fields. This handles those.
-async function _answerCustomDropdowns(page, job) {
+async function _answerCustomDropdowns(page, job) { // page may be a modal ElementHandle
   try {
     const triggers = await page.$$('button[aria-haspopup="listbox"], [role="combobox"] button, [data-test-form-builder-dropdown] button');
     for (const trigger of triggers) {
@@ -613,21 +676,37 @@ async function _answerCheckboxes(page) {
 }
 
 async function _answerRadios(page, job) {
-  try {
-    const fieldsets = await page.$$('fieldset');
-    for (const fieldset of fieldsets) {
-      const question = await fieldset.evaluate(el => {
-        const leg = el.querySelector('legend, .jobs-easy-apply-form-element__label, label');
-        return leg ? leg.innerText.toLowerCase() : '';
-      });
-      const radios = await fieldset.$$('input[type="radio"]');
+  // Find radio groups — LinkedIn uses both <fieldset> and <div role="group">
+  const groups = await page.$$('fieldset, [role="group"]').catch(() => []);
+  for (const group of groups) {
+    try {
+      const question = await group.evaluate(el => {
+        // Prefer legend or an explicit question label over option labels
+        const leg = el.querySelector('legend');
+        if (leg) return leg.innerText.toLowerCase();
+        // LinkedIn form builder uses .fb-radio-group__label or similar
+        const fbLabel = el.querySelector('[class*="label"]:not(label[for])');
+        if (fbLabel && fbLabel.innerText.trim().length > 3) return fbLabel.innerText.toLowerCase();
+        // Walk up to find parent question label
+        const parentWrap = el.closest('[class*="form-element"], [class*="form-field"], [class*="FormElement"]');
+        if (parentWrap) {
+          const lab = parentWrap.querySelector('label, legend, [class*="label"]');
+          if (lab) return lab.innerText.toLowerCase();
+        }
+        return '';
+      }).catch(() => '');
+      const radios = await group.$$('input[type="radio"]').catch(() => []);
       if (!radios.length) continue;
       const options = [];
       for (const radio of radios) {
         const labelText = await radio.evaluate(el => {
-          const lab = document.querySelector(`label[for="${el.id}"]`) || el.closest('label') || el.parentElement?.querySelector('label');
+          const id = el.id;
+          const lab = (id && document.querySelector(`label[for="${id}"]`)) ||
+                      el.closest('label') ||
+                      el.parentElement?.querySelector('label') ||
+                      el.nextElementSibling;
           return lab ? lab.innerText.toLowerCase().trim() : '';
-        });
+        }).catch(() => '');
         options.push({ radio, label: labelText });
       }
       let target = null;
@@ -637,8 +716,11 @@ async function _answerRadios(page, job) {
       } else if (/right to work|work permit|authoris|authoriz|eligible.*work|legal.*work|work.*authoris/i.test(question)) {
         const rtw = hasRightToWork(job?.description);
         target = rtw ? options.find(o => /^yes/.test(o.label)) : options.find(o => /^no/.test(o.label));
-      } else if (/commut|travel to|able to.*office|willing to.*office|office.*location/i.test(question)) {
-        target = options.find(o => /^yes/.test(o.label));
+      } else if (/commut|travel to|able to.*office|willing to.*office|office.*location|onsite setting|comfortable.*onsite|comfortable.*office/i.test(question)) {
+        const wantsOnsite = cfg.WORK_TYPE_PRIORITY.includes('onsite');
+        target = wantsOnsite
+          ? options.find(o => /^yes/.test(o.label))
+          : options.find(o => /^no/.test(o.label));
       } else if (/british|uk citizen|citizen.*uk|nationality/i.test(question)) {
         target = options.find(o => /^yes/.test(o.label));
       } else if (/gender|sex(?!ual)/i.test(question)) {
@@ -668,6 +750,18 @@ async function _answerRadios(page, job) {
         else if (eth === 'mixed') target = options.find(o => /mixed|multiple/i.test(o.label));
         else if (eth === 'mena') target = options.find(o => /middle east|north african/i.test(o.label));
         else target = options.find(o => /prefer not|decline|not.*say/i.test(o.label)) || options[options.length - 1];
+      } else if (/notice period|how.*soon.*start|when.*available.*start|notice.*required/i.test(question)) {
+        const avMap = {
+          'immediately': /immediate|asap|now|^0\s*|no notice|straight away/,
+          '1week':       /^1\s*week|one\s*week/,
+          '2weeks':      /^2\s*week|two\s*week/,
+          '1month':      /^1\s*month|one\s*month/,
+          '2months':     /^2\s*month|two\s*month/,
+          '3months':     /^3\s*month|three\s*month/,
+        };
+        const avKey = cfg.APPLICANT.availability || 'immediately';
+        const pattern = avMap[avKey];
+        target = options.find(o => pattern && pattern.test(o.label)) || options[0];
       } else if (/experience|work.*with|have you.*used|familiar|proficient/i.test(question)) {
         target = options.find(o => /^yes/.test(o.label));
       } else if (/reloc/i.test(question)) {
@@ -684,10 +778,23 @@ async function _answerRadios(page, job) {
       }
       if (target) {
         const already = await target.radio.isChecked().catch(() => false);
-        if (!already) await target.radio.click().catch(() => {});
+        if (!already) {
+          await target.radio.scrollIntoViewIfNeeded().catch(() => {});
+          // LinkedIn uses custom-styled radio buttons — click the parent <label>
+          // rather than the hidden <input> so the UI actually registers the selection.
+          const clicked = await target.radio.evaluate(el => {
+            const lab = el.closest('label') || el.parentElement?.querySelector('label');
+            if (lab) { lab.click(); return true; }
+            el.click();
+            return false;
+          }).catch(() => false);
+          if (!clicked) await target.radio.click().catch(() => {});
+        }
       }
+    } catch (err) {
+      console.log(`  [LinkedIn] Radio fill error: ${err.message}`);
     }
-  } catch (_) {}
+  }
 }
 
 async function _answerSelects(page, job) {
@@ -712,40 +819,81 @@ async function _answerSelects(page, job) {
   } catch (_) {}
 }
 
+async function _fillInput(inp, value) {
+  try {
+    await inp.click({ clickCount: 3 }).catch(() => {});
+    await DELAY(80);
+    await inp.fill(String(value)).catch(() => {});
+    await DELAY(100);
+  } catch (_) {}
+}
+
 async function _answerTextInputs(page, job) {
   try {
-    const inputs = await page.$$('input[type="number"], input[type="text"]');
+    const inputs = await page.$$('input[type="number"], input[type="text"], input:not([type])');
     for (const inp of inputs) {
       const isVisible = await inp.isVisible().catch(() => false);
       if (!isVisible) continue;
+      // Only skip if there's a meaningful non-zero value already entered
       const current = await inp.inputValue().catch(() => '');
-      if (current) continue;
+      const type = await inp.getAttribute('type').catch(() => 'text');
+      if (current && (type !== 'number' || Number(current) !== 0)) continue;
       const question = await inp.evaluate(el => {
         const id = el.id;
-        const lab = id ? document.querySelector(`label[for="${el.id}"]`) : null;
-        return (lab ? lab.innerText : el.closest('.jobs-easy-apply-form-element')?.querySelector('label')?.innerText || '').toLowerCase();
+        // Try label[for] association first
+        if (id) {
+          const lab = document.querySelector(`label[for="${id}"]`);
+          if (lab) return lab.innerText.toLowerCase();
+        }
+        // Walk up through multiple LinkedIn form container patterns
+        const containers = [
+          '.jobs-easy-apply-form-element',
+          '.fb-form-element',
+          '.fb-text-field',
+          '.fb-form-field',
+          '[class*="form-element"]',
+          '[class*="formElement"]',
+          '[class*="form-field"]',
+          '[class*="FormField"]',
+        ];
+        for (const sel of containers) {
+          const wrap = el.closest(sel);
+          if (wrap) {
+            const lab = wrap.querySelector('legend, label, .fb-label, [class*="label"]');
+            if (lab && lab !== el) return lab.innerText.toLowerCase();
+          }
+        }
+        // Last resort: parent and grandparent
+        for (const ancestor of [el.parentElement, el.parentElement?.parentElement]) {
+          if (!ancestor) continue;
+          const lab = ancestor.querySelector('label, legend');
+          if (lab && lab !== el) return lab.innerText.toLowerCase();
+        }
+        return '';
       });
       if (/require.*sponsor|need.*sponsor|visa.*sponsor|sponsor.*visa|employer.*sponsor/i.test(question)) {
-        await inp.fill(cfg.APPLICANT.requiresSponsorship ? 'Yes' : 'No').catch(() => {});
+        await _fillInput(inp, cfg.APPLICANT.requiresSponsorship ? 'Yes' : 'No');
       } else if (/right to work|work permit|authoris|authoriz|eligible.*work|legal.*work/i.test(question)) {
-        await inp.fill(hasRightToWork(job?.description) ? 'Yes' : 'No').catch(() => {});
+        await _fillInput(inp, hasRightToWork(job?.description) ? 'Yes' : 'No');
       } else if (/commut|travel to|able to.*office|willing to.*office/i.test(question)) {
-        await inp.fill('Yes').catch(() => {});
+        await _fillInput(inp, 'Yes');
       } else if (/year.*experience|experience.*year|how many year|how long/i.test(question)) {
-        await inp.fill(String(cfg.APPLICANT.yearsExperience ?? 0)).catch(() => {});
+        await _fillInput(inp, cfg.APPLICANT.yearsExperience ?? 0);
       } else if (/salary|expected.*pay|compensation|remuneration/i.test(question)) {
-        if (cfg.APPLICANT.salaryExpectation) await inp.fill(cfg.APPLICANT.salaryExpectation).catch(() => {});
+        if (cfg.APPLICANT.salaryExpectation) await _fillInput(inp, cfg.APPLICANT.salaryExpectation);
       } else if (/notice period|availability|available to start|when can you start/i.test(question)) {
         const avText = { 'immediately': 'Immediately available', '1week': '1 week', '2weeks': '2 weeks', '1month': '1 month', '2months': '2 months', '3months': '3 months' };
-        await inp.fill(avText[cfg.APPLICANT.availability || 'immediately'] || 'Immediately available').catch(() => {});
+        await _fillInput(inp, avText[cfg.APPLICANT.availability || 'immediately'] || 'Immediately available');
       } else if (/reloc/i.test(question)) {
-        await inp.fill(cfg.APPLICANT.willingToRelocate ? 'Yes' : 'No').catch(() => {});
+        await _fillInput(inp, cfg.APPLICANT.willingToRelocate ? 'Yes' : 'No');
       } else {
-        const type = await inp.getAttribute('type').catch(() => 'text');
         if (type === 'number') {
-          await inp.fill(String(cfg.APPLICANT.yearsExperience ?? 0)).catch(() => {});
+          await _fillInput(inp, cfg.APPLICANT.yearsExperience ?? 0);
         } else {
-          console.log(`  [LinkedIn] Unknown text field: "${question}" — left blank`);
+          // Unknown text field — use yearsExperience as the safest numeric default
+          const yr = String(cfg.APPLICANT.yearsExperience ?? 0);
+          await _fillInput(inp, yr);
+          console.log(`  [LinkedIn] Unknown text field: "${question || '(no label)'}" — filled with yearsExperience (${yr})`);
         }
       }
     }
@@ -770,6 +918,7 @@ async function _answerTextareas(page, job) {
       if (!ctx.required && !ctx.label) continue;
       const text = buildTextareaAnswer(ctx.label, job || {});
       if (text) {
+        await ta.click().catch(() => {}); await DELAY(80);
         await ta.fill(text).catch(() => {});
         console.log(`  [LinkedIn] Filled textarea: "${ctx.label || '(unlabelled)'}"`);
       } else {
@@ -877,4 +1026,16 @@ async function dismissModal(page) {
   } catch (_) {}
 }
 
-module.exports = { login, searchJobs, getJobDescription, applyToJob, dismissModal };
+async function ensureLoggedIn(page) {
+  await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await DELAY(2000);
+  const isLoggedIn = await page.evaluate(() => {
+    const t = (document.body?.innerText || '').toLowerCase();
+    return t.includes('home') || t.includes('my network') || t.includes('jobs') ||
+           !!document.querySelector('[class*="global-nav"], [class*="feed-identity"]');
+  }).catch(() => false);
+  if (!isLoggedIn) throw new Error('LinkedIn: not logged in. Click "Connect account" on the LinkedIn bot card first.');
+  console.log('  [LinkedIn] Session active');
+}
+
+module.exports = { ensureLoggedIn, login, searchJobs, getJobDescription, applyToJob, dismissModal };

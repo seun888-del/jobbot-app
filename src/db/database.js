@@ -274,6 +274,10 @@ function addCV({ label, file_path, extracted_keywords = [], suggested_roles = []
   return getCVs().find(c => c.id === result.lastInsertRowid);
 }
 
+function removeCV(id) {
+  db.prepare('DELETE FROM cvs WHERE id = ?').run([id]);
+}
+
 // ── Credentials (encrypted via Electron safeStorage by caller) ────────────
 function saveCredential({ site, username, secret_enc }) {
   const existing = db.prepare('SELECT id FROM credentials WHERE site = ?').get([site]);
@@ -381,6 +385,7 @@ module.exports = {
   setExcludeKeywordActive,
   getCVs,
   addCV,
+  removeCV,
   saveCredential,
   getCredential,
   recordBotStart,

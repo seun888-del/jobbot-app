@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('api', {
     get: () => ipcRenderer.invoke('cvs:get'),
     pickAndAdd: (label) => ipcRenderer.invoke('cvs:pickAndAdd', label),
     addSuggestedTerms: (cvId) => ipcRenderer.invoke('cvs:addSuggestedTerms', cvId),
+    remove: (cvId) => ipcRenderer.invoke('cvs:remove', cvId),
   },
   credentials: {
     save: (site, username, password) => ipcRenderer.invoke('credentials:save', { site, username, password }),
@@ -66,6 +67,9 @@ contextBridge.exposeInMainWorld('api', {
   },
   shell: {
     openPath: (filePath) => ipcRenderer.invoke('shell:openPath', filePath),
+  },
+  session: {
+    importChrome: (botName) => ipcRenderer.invoke('session:importChrome', botName),
   },
   site: {
     connect: (site, loginUrl) => ipcRenderer.invoke('site:connect', { site, loginUrl }),

@@ -12,7 +12,7 @@ const queue          = require('./modules/queue_manager');
 const logger         = require('./modules/logger');
 const salary         = require('./modules/salary_filter');
 const stealth        = require('./modules/stealth');
-const { launchPersistentContext } = require('./modules/browser_launcher');
+const { launchPersistentContext, connectToRunningChrome } = require('./modules/browser_launcher');
 const path           = require('path');
 
 const DELAY         = ms => new Promise(r => setTimeout(r, ms));
@@ -42,7 +42,7 @@ function workTypePriority() {
   return map;
 }
 
-async function phase1_searchAndQueue(page) {
+async function phase1_searchAndQueue(context, page) {
   console.log('\n══════════════════════════════════════════════════════');
   console.log('  [Glassdoor Bot] Phase 1 — Searching for jobs');
   console.log('══════════════════════════════════════════════════════');
@@ -62,10 +62,6 @@ async function phase1_searchAndQueue(page) {
       if (queue.wasApplied(job.jobId)) { console.log(`  [Glassdoor Bot] Already applied — skipping: ${job.title}`); continue; }
       if (!isRelevantTitle(job.title)) { console.log(`  [Glassdoor Bot] Title filter — skipping: ${job.title}`); continue; }
       if (isBlockedCompany(job.company)) { console.log(`  [Glassdoor Bot] Company blocked — skipping: ${job.title} @ ${job.company}`); continue; }
-      if (queue.wasAppliedToCompanyRecently(job.company)) {
-        console.log(`  [Glassdoor Bot] Applied to ${job.company} in last 30 days — skipping: ${job.title}`);
-        continue;
-      }
       if (queue.hasCanonical(job.title, job.company)) {
         console.log(`  [Glassdoor Bot] Duplicate (cross-site) — skipping: ${job.title} @ ${job.company}`);
         continue;
@@ -78,8 +74,19 @@ async function phase1_searchAndQueue(page) {
           queue.add({ ...job, source: 'glassdoor', status: 'skipped', reason: 'JD too short or missing' });
           continue;
         }
+
+        if (cfg.isTrainingCourseJD(jobDetails.description, job.title)) {
+          console.log(`  [Glassdoor Bot] Training course — skipping: ${job.title}`);
+          queue.add({ ...job, source: 'glassdoor', status: 'skipped', reason: 'Training course' });
+          continue;
+        }
+
+        if (!jobDetails.hasEasyApply && jobDetails.hasExternalApply) {
+          queue.add({ ...job, source: 'glassdoor', status: 'skipped', reason: 'External apply only (apply on company website)' });
+          continue;
+        }
         if (!jobDetails.hasEasyApply) {
-          queue.add({ ...job, source: 'glassdoor', status: 'skipped', reason: 'No Easy Apply button' });
+          queue.add({ ...job, source: 'glassdoor', status: 'skipped', reason: 'No Easy Apply button found' });
           continue;
         }
         if (cfg.APPLICANT.seekSponsorship) {
@@ -89,6 +96,13 @@ async function phase1_searchAndQueue(page) {
             continue;
           }
         }
+        const workType = detectWorkType(jobDetails.description);
+        if (!cfg.WORK_TYPE_PRIORITY.includes(workType)) {
+          console.log(`  [Glassdoor Bot] Work type "${workType}" not wanted — skipping: ${job.title}`);
+          queue.add({ ...job, source: 'glassdoor', status: 'skipped', reason: `Work type (${workType}) not wanted` });
+          continue;
+        }
+
         if (!salary.isAcceptable(jobDetails.description, cfg.APPLICANT.salaryExpectation)) {
           const min = salary.extractMinSalary(jobDetails.description);
           console.log(`  [Glassdoor Bot] Below salary (£${min?.toLocaleString() || '?'}) — skipping: ${job.title}`);
@@ -96,7 +110,6 @@ async function phase1_searchAndQueue(page) {
           continue;
         }
 
-        const workType = detectWorkType(jobDetails.description);
         queue.add({ ...jobDetails, source: 'glassdoor', workType });
         console.log(`  [Glassdoor Bot] → Queued for Scorer: ${job.title} @ ${job.company} [${workType}]`);
       } catch (err) {
@@ -108,6 +121,7 @@ async function phase1_searchAndQueue(page) {
 
   const pending = queue.getByStatus('pending').filter(j => j.source === 'glassdoor').length;
   console.log(`\n  [Glassdoor Bot] Phase 1 complete. ${pending} job(s) queued for Scorer.`);
+  return page;
 }
 
 async function phase2_applyReadyCVs(page) {
@@ -130,6 +144,7 @@ async function phase2_applyReadyCVs(page) {
       ...queue.getByStatus('pending').filter(j => j.source === 'glassdoor'),
       ...queue.getByStatus('processing').filter(j => j.source === 'glassdoor'),
     ].length;
+    const pendingJobs = pendingCount;
 
     for (const job of readyJobs) {
       const appliedToday = queue.countAppliedToday();
@@ -153,6 +168,19 @@ async function phase2_applyReadyCVs(page) {
           queue.update(job.jobId, { status: 'skipped' });
           queue.markApplied(job.jobId);
           logger.log(job.title, job.company, job.url, job.cvName, job.cvScore, 'SKIPPED', 'Already applied');
+          console.log(`  [Glassdoor Bot] Already applied — skipping: ${job.title}`);
+          continue;
+        }
+        if (applied === 'external') {
+          queue.update(job.jobId, { status: 'skipped', reason: 'External application site' });
+          logger.log(job.title, job.company, job.url, job.cvName, job.cvScore, 'SKIPPED', 'External application site');
+          console.log(`  [Glassdoor Bot] External site — skipping: ${job.title}`);
+          continue;
+        }
+        if (applied === 'auth_required') {
+          queue.update(job.jobId, { status: 'skipped', reason: 'Indeed login required — reconnect Glassdoor account' });
+          logger.log(job.title, job.company, job.url, job.cvName, job.cvScore, 'SKIPPED', 'Indeed session missing');
+          console.log(`  [Glassdoor Bot] Indeed not logged in — click Connect account and log into both tabs: ${job.title}`);
           continue;
         }
         const finalStatus = applied ? 'applied' : 'apply_failed';
@@ -163,13 +191,20 @@ async function phase2_applyReadyCVs(page) {
           applied ? 'Glassdoor Easy Apply' : 'Glassdoor form could not be completed');
         console.log(`  [Glassdoor Bot] ${applied ? '✓ Applied' : '✗ Apply failed'}: ${job.title}`);
       } catch (err) {
-        queue.update(job.jobId, { status: 'apply_failed', error: err.message });
-        logger.log(job.title, job.company, job.url, 'N/A', 0, 'ERROR', err.message.substring(0, 100));
-        console.error(`  [Glassdoor Bot] Error: ${err.message}`);
+        const isPageIssue = /apply button not found|no apply button|external/i.test(err.message);
+        if (isPageIssue) {
+          queue.update(job.jobId, { status: 'skipped', reason: err.message });
+          logger.log(job.title, job.company, job.url, job.cvName || 'N/A', job.cvScore || 0, 'SKIPPED', err.message.substring(0, 100));
+          console.log(`  [Glassdoor Bot] Page issue — skipping: ${job.title} (${err.message})`);
+        } else {
+          queue.update(job.jobId, { status: 'apply_failed', error: err.message });
+          logger.log(job.title, job.company, job.url, 'N/A', 0, 'ERROR', err.message.substring(0, 100));
+          console.error(`  [Glassdoor Bot] Error applying to "${job.title}": ${err.message}`);
+        }
       }
 
-      const pause = 10000 + Math.random() * 8000;
-      console.log(`  [Glassdoor Bot] Pausing ${Math.round(pause / 1000)}s...`);
+      const pause = 8000 + Math.random() * 7000;
+      console.log(`  [Glassdoor Bot] Pausing ${Math.round(pause / 1000)}s before next application...`);
       await DELAY(pause);
     }
 
@@ -177,10 +212,11 @@ async function phase2_applyReadyCVs(page) {
       idleCount = 0;
     } else if (pendingCount > 0) {
       idleCount = 0;
-      console.log(`  [Glassdoor Bot] Waiting for Scorer... (${pendingCount} job(s) pending)`);
+      try { queue.printStatus(); } catch (_) {}
+      console.log(`  [Glassdoor Bot] Waiting for Scorer bot... (${pendingCount} Glassdoor job(s) in progress)`);
     } else {
       idleCount++;
-      console.log(`  [Glassdoor Bot] Idle ${idleCount}/${MAX_IDLE}`);
+      console.log(`  [Glassdoor Bot] Idle ${idleCount}/${MAX_IDLE} — no pending or ready Glassdoor jobs`);
     }
 
     if (idleCount >= MAX_IDLE) break;
@@ -206,17 +242,27 @@ async function main() {
   }
 
   const profileDir = path.join(process.env.JOBBOT_USERDATA, 'glassdoor_profile');
-  const context = await launchPersistentContext(profileDir);
+  const cdpPort = process.env.JOBBOT_CDP_PORT;
+  const context = cdpPort
+    ? await connectToRunningChrome(parseInt(cdpPort)).catch(() => launchPersistentContext(profileDir))
+    : await launchPersistentContext(profileDir);
   await stealth.applyToContext(context);
-  const gdPage = await context.newPage();
 
+  let gdPage = await context.newPage();
   try {
     await glassdoor.ensureLoggedIn(gdPage, domain);
+  } catch (err) {
+    console.error('ERROR: ' + err.message);
+    await context.close().catch(() => {});
+    process.exit(1);
+  }
+
+  try {
     while (true) {
-      await phase1_searchAndQueue(gdPage);
+      gdPage = await phase1_searchAndQueue(context, gdPage);
       await phase2_applyReadyCVs(gdPage);
       logger.printSummary();
-      console.log('\n  [Glassdoor Bot] Cycle complete. Waiting 1 min...');
+      console.log('\n  [Glassdoor Bot] Cycle complete. Waiting 1 min before next search...');
       await DELAY(60 * 1000);
     }
   } catch (err) {

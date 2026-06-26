@@ -33,6 +33,7 @@ jobs:
         run: |
           (Get-Content bot\config.js) -replace '__CAPSOLVER_KEY__', '${{ secrets.CAPSOLVER_KEY }}' | Set-Content bot\config.js
           (Get-Content bot\modules\browser_launcher.js) -replace '__PROXY_URL__', '${{ secrets.PROXY_URL }}' | Set-Content bot\modules\browser_launcher.js
+          (Get-Content main.js) -replace '__PROXY_URL__', '${{ secrets.PROXY_URL }}' | Set-Content main.js
         shell: pwsh
 
       - name: Build Windows installer
@@ -86,6 +87,7 @@ jobs:
         run: |
           sed -i '' 's/__CAPSOLVER_KEY__/${{ secrets.CAPSOLVER_KEY }}/g' bot/config.js
           sed -i '' 's|__PROXY_URL__|${{ secrets.PROXY_URL }}|g' bot/modules/browser_launcher.js
+          sed -i '' 's|__PROXY_URL__|${{ secrets.PROXY_URL }}|g' main.js
 
       - name: Build Mac DMG
         run: npm run dist:mac

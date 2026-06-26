@@ -86,10 +86,6 @@ async function phase1_searchAndQueue(page) {
         continue;
       }
 
-      if (queue.wasAppliedToCompanyRecently(job.company)) {
-        console.log(`  [Indeed Bot] Applied to ${job.company} in last 30 days — skipping: ${job.title}`);
-        continue;
-      }
 
       if (queue.hasCanonical(job.title, job.company)) {
         console.log(`  [Indeed Bot] Duplicate (cross-site) — skipping: ${job.title} @ ${job.company}`);
@@ -102,6 +98,12 @@ async function phase1_searchAndQueue(page) {
         if (!jobDetails.description || jobDetails.description.trim().split(/\s+/).length < 80) {
           console.log(`  [Indeed Bot] Short/missing JD — skipping: ${job.title}`);
           queue.add({ ...job, source: 'indeed', status: 'skipped', reason: 'JD too short or missing' });
+          continue;
+        }
+
+        if (cfg.isTrainingCourseJD(jobDetails.description, job.title)) {
+          console.log(`  [Indeed Bot] Training course — skipping: ${job.title}`);
+          queue.add({ ...job, source: 'indeed', status: 'skipped', reason: 'Training course' });
           continue;
         }
 
@@ -121,6 +123,11 @@ async function phase1_searchAndQueue(page) {
         }
 
         const workType = detectWorkType(jobDetails.description);
+        if (!cfg.WORK_TYPE_PRIORITY.includes(workType)) {
+          console.log(`  [Indeed Bot] Work type "${workType}" not wanted — skipping: ${job.title}`);
+          queue.add({ ...job, source: 'indeed', status: 'skipped', reason: `Work type (${workType}) not wanted` });
+          continue;
+        }
 
         if (!salary.isAcceptable(jobDetails.description, cfg.APPLICANT.salaryExpectation)) {
           const min = salary.extractMinSalary(jobDetails.description);
@@ -201,9 +208,16 @@ async function phase2_applyReadyCVs(page) {
         );
         console.log(`  [Indeed Bot] ${applied ? '✓ Applied' : '✗ Apply failed'}: ${job.title}`);
       } catch (err) {
-        queue.update(job.jobId, { status: 'apply_failed', error: err.message });
-        logger.log(job.title, job.company, job.url, 'N/A', 0, 'ERROR', err.message.substring(0, 100));
-        console.error(`  [Indeed Bot] Error applying to "${job.title}": ${err.message}`);
+        const isPageIssue = /apply button not found|no apply button|external/i.test(err.message);
+        if (isPageIssue) {
+          queue.update(job.jobId, { status: 'skipped', reason: err.message });
+          logger.log(job.title, job.company, job.url, job.cvName || 'N/A', job.cvScore || 0, 'SKIPPED', err.message.substring(0, 100));
+          console.log(`  [Indeed Bot] Page issue — skipping: ${job.title} (${err.message})`);
+        } else {
+          queue.update(job.jobId, { status: 'apply_failed', error: err.message });
+          logger.log(job.title, job.company, job.url, 'N/A', 0, 'ERROR', err.message.substring(0, 100));
+          console.error(`  [Indeed Bot] Error applying to "${job.title}": ${err.message}`);
+        }
       }
 
       // Human-like pause between applications: 10–18 seconds
@@ -216,7 +230,7 @@ async function phase2_applyReadyCVs(page) {
       idleCount = 0;
     } else if (pendingCount > 0) {
       idleCount = 0;
-      queue.printStatus();
+      try { queue.printStatus(); } catch (_) {}
       console.log(`  [Indeed Bot] Waiting for Scorer bot... (${pendingCount} Indeed job(s) in progress)`);
     } else {
       idleCount++;
@@ -246,6 +260,9 @@ async function main() {
     for (const j of stuckApplying) queue.update(j.jobId, { status: 'cv_ready' });
   }
 
+  // Always use launchPersistentContext (stealth plugin, no --remote-debugging-port).
+  // CDP-connected Chrome exposes automation markers that trigger Indeed's verification loop
+  // even when a human manually clicks the checkbox. Profile cookies are reused either way.
   const profileDir = path.join(process.env.JOBBOT_USERDATA, 'indeed_profile');
   const context = await launchPersistentContext(profileDir);
   await stealth.applyToContext(context);

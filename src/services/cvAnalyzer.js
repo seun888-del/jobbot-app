@@ -1,5 +1,7 @@
-const fs = require('fs');
+const fs       = require('fs');
+const path     = require('path');
 const pdfParse = require('pdf-parse');
+const mammoth  = require('mammoth');
 const { llmAvailable, llmChat } = require('./llm');
 
 async function extractPdfText(filePath) {
@@ -8,15 +10,22 @@ async function extractPdfText(filePath) {
   return data.text;
 }
 
-// Analyse a CV PDF with Ollama: extract skill keywords and suggest job titles
-// this CV is a good match for. Falls back to empty arrays if Ollama is
-// unavailable or the response can't be parsed.
+async function extractCVText(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.docx' || ext === '.doc') {
+    const result = await mammoth.extractRawText({ path: filePath });
+    return result.value;
+  }
+  return extractPdfText(filePath);
+}
+
+// Analyse a CV (PDF or docx): extract skill keywords and suggest job titles
 async function analyzeCV(filePath) {
   let cvText;
   try {
-    cvText = await extractPdfText(filePath);
+    cvText = await extractCVText(filePath);
   } catch (err) {
-    console.error('[CV Analyzer] PDF extraction failed:', err.message);
+    console.error('[CV Analyzer] CV extraction failed:', err.message);
     return { keywords: [], suggestedRoles: [] };
   }
 

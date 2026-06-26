@@ -52,6 +52,12 @@ function getStatus() {
   };
 }
 
+const JOB_SITE_BOTS = new Set(['reed', 'linkedin']);
+
+function anyJobSiteBotRunning() {
+  return [...JOB_SITE_BOTS].some(name => bots[name].proc !== null);
+}
+
 function isWithinSchedule() {
   const prefs = db.getSearchPreferences();
   if (!prefs.schedule_enabled) return true;
@@ -66,7 +72,10 @@ function isWithinSchedule() {
 
 // Spawn via the Electron binary itself (ELECTRON_RUN_AS_NODE) since a
 // packaged app has no standalone node.exe on PATH.
-function start(botName, userDataPath) {
+// opts.cdpPort — if set, the bot attaches to the already-open Chrome via CDP
+//                instead of launching a new browser. This reuses the exact
+//                logged-in session from the "Connect account" window.
+function start(botName, userDataPath, opts = {}) {
   if (!BOT_SCRIPTS[botName]) throw new Error(`Unknown bot: ${botName}`);
   if (bots[botName].proc) return;
 
@@ -81,6 +90,23 @@ function start(botName, userDataPath) {
     ELECTRON_RUN_AS_NODE: '1',
     JOBBOT_USERDATA: userDataPath,
   };
+
+  // Ollama URL saved via AI Settings — inject so bots connect to the right Ollama instance
+  const ollamaCred = db.getCredential('ollama');
+  if (ollamaCred?.secret_enc && safeStorage.isEncryptionAvailable()) {
+    try { env.OLLAMA_URL = safeStorage.decryptString(Buffer.from(ollamaCred.secret_enc, 'base64')); } catch (_) {}
+  }
+
+  // If Chrome is still open from "Connect account", pass the CDP port so the
+  // bot can attach to that live session instead of launching a new browser.
+  if (opts.cdpPort) {
+    env.JOBBOT_CDP_PORT = String(opts.cdpPort);
+  }
+
+  // Reed API key for direct API job search (Phase 1 without browser)
+  if (opts.reedApiKey) {
+    env.REED_API_KEY = opts.reedApiKey;
+  }
 
   // In a packaged app, Playwright's browsers are bundled under resources/
   // rather than the dev-machine's ms-playwright cache.
@@ -97,32 +123,7 @@ function start(botName, userDataPath) {
     env.JOBBOT_LICENSE_KEY = license.license_key;
   }
 
-  if (botName === 'reed') {
-    const cred = db.getCredential('reed');
-    if (!cred || !cred.secret_enc) {
-      throw new Error('No Reed credentials saved — add them in Settings before starting the Reed bot');
-    }
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error('OS-level credential encryption is not available on this machine');
-    }
-    env.REED_EMAIL = cred.username;
-    env.REED_PASS = safeStorage.decryptString(Buffer.from(cred.secret_enc, 'base64'));
-  }
-
-  if (botName === 'linkedin') {
-    const cred = db.getCredential('linkedin');
-    if (!cred || !cred.secret_enc) {
-      throw new Error('No LinkedIn credentials saved — add them in Job Site Login before starting the LinkedIn bot');
-    }
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error('OS-level credential encryption is not available on this machine');
-    }
-    env.LI_EMAIL = cred.username;
-    env.LI_PASS = safeStorage.decryptString(Buffer.from(cred.secret_enc, 'base64'));
-  }
-
-  // indeed, glassdoor, cvlibrary, totaljobs, cwjobs use persistent Chrome profiles
-  // set up via the Connect button in Job Site Login — no credentials needed here.
+  // All bots use Chrome profiles from "Connect account" — no stored credentials needed.
 
   const scriptPath = path.join(BOT_DIR, BOT_SCRIPTS[botName]);
   const proc = spawn(process.execPath, [scriptPath], { cwd: BOT_DIR, env });
@@ -140,11 +141,27 @@ function start(botName, userDataPath) {
     bots[botName].stopping = false;
     db.recordBotStop(botName, finalStatus);
     emitStatus(botName, finalStatus);
+
+    // Auto-stop scorer when the last job site bot exits
+    if (JOB_SITE_BOTS.has(botName) && !anyJobSiteBotRunning() && bots.scorer.proc) {
+      if (logHandler) logHandler('scorer', 'stdout', '[Scorer] All job site bots stopped — stopping scorer automatically.\n');
+      stop('scorer');
+    }
   });
 
   proc.on('error', err => {
     if (logHandler) logHandler(botName, 'stderr', `Failed to start: ${err.message}\n`);
   });
+
+  // Auto-start scorer alongside any job site bot (if not already running)
+  if (JOB_SITE_BOTS.has(botName) && !bots.scorer.proc) {
+    try {
+      start('scorer', userDataPath, {});
+      if (logHandler) logHandler('scorer', 'stdout', '[Scorer] Auto-started alongside ' + botName + '.\n');
+    } catch (e) {
+      if (logHandler) logHandler('scorer', 'stderr', '[Scorer] Auto-start failed: ' + e.message + '\n');
+    }
+  }
 }
 
 // Force-kill the whole process tree on Windows — Playwright's Chromium runs

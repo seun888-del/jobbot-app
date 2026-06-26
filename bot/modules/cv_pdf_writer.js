@@ -93,9 +93,10 @@ function preprocessLines(lines) {
         const isNotHeading   = !(/^[A-Z\s&\/()-]+$/.test(trimmed) && trimmed.length < 65 && trimmed.replace(/[^A-Z]/g,'').length >= 3);
         const isNotJobEntry  = !trimmed.includes(' | ');
         // Skill lines have "Category: content" format — exclude these from para-joining
-        const isNotSkillLine = !/^[A-Z][A-Za-z ,&\/()-]{2,40}:\s+/.test(trimmed);
-        const prevIsSkillLine = /^[A-Z][A-Za-z ,&\/()-]{2,40}:\s+/.test(prevTrim);
-        const prevIsParaLine = !prevIsBullet && !prevIsSkillLine && !/^[A-Z\s&\/()-]+$/.test(prevTrim) && prevTrim.length > 10;
+        const isNotSkillLine = !/^[A-Z][A-Za-z0-9 ,&\/()-]{2,40}:\s+/.test(trimmed);
+        const prevIsSkillLine = /^[A-Z][A-Za-z0-9 ,&\/()-]{2,40}:\s+/.test(prevTrim);
+        const prevIsJobEntry  = prevTrim.includes(' | ') && DATE_RE.test(prevTrim);
+        const prevIsParaLine = !prevIsBullet && !prevIsSkillLine && !prevIsJobEntry && !/^[A-Z\s&\/()-]+$/.test(prevTrim) && prevTrim.length > 10;
         // Ends with comma
         const prevParaEndsComma = prevIsParaLine && prevTrim.endsWith(',');
         // Ends with preposition/conjunction/article
@@ -124,7 +125,7 @@ function drawRule(doc, left, right) {
   doc.moveTo(left, y).lineTo(right, y).lineWidth(0.5).stroke(RULE);
 }
 
-function writePDF(cvText, outputPath) {
+function writePDF(cvText, outputPath, options = {}) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({
       size:    'A4',
@@ -147,18 +148,31 @@ function writePDF(cvText, outputPath) {
       .replace(/[,\s]*\b\d+\s+[Rr]equired\b[,\s]*/g, ', ')
       .replace(/,\s*,/g, ',')       // collapse any double-commas left behind
       .replace(/,\s*$/gm, '')       // remove trailing commas at end of lines
-      .replace(/^\s*,\s*/gm, '');   // remove leading commas at start of lines
+      .replace(/^\s*,\s*/gm, '')    // remove leading commas at start of lines
+      .replace(/\s*References available on request\.?\s*/gi, '');  // boilerplate — remove
     const rawLines    = cleanedText.split('\n').map(l => l.trimEnd());
     const lines       = preprocessLines(rawLines);
 
     // ── Identify header block ──────────────────────────────────────────────
     const nonEmpty   = lines.filter(l => l.trim().length > 0);
-    const nameLine   = nonEmpty[0] ? nonEmpty[0].trim() : '';
+    // Use override name if provided (avoids letter-spacing collapse artifacts like "FEMIMERIT")
+    const rawNameLine = nonEmpty[0] ? nonEmpty[0].trim() : '';
+    const nameLine   = options.overrideName || rawNameLine;
     const subLine    = nonEmpty[1] ? nonEmpty[1].trim() : '';
-    const contactLine = nonEmpty.slice(0, 6).find(l =>
+
+    // Find contact line and trim any profile text that bled in during PDF extraction.
+    // E.g. "London | 07359... | email@... | linkedin.com/in/x Results-driven IT..." → strip after URL end.
+    const rawContact = nonEmpty.slice(0, 6).find(l =>
       l.includes('@') || /\d{6,}/.test(l)
     ) || '';
-    const headerSet  = new Set([nameLine, subLine, contactLine].filter(Boolean));
+    const contactLine = rawContact
+      .split(/\s*\|\s*/)
+      .map(p => p.replace(/((?:https?:\/\/)?(?:www\.)?[\w-]+\.(?:com|uk|org|net|io)\/\S*)\s+.*/, '$1').trim())
+      .filter(p => p.length > 0 && p.length < 80)
+      .slice(0, 5)
+      .join(' | ');
+
+    const headerSet  = new Set([rawNameLine, subLine, rawContact].filter(Boolean));
 
     // ── Render header ──────────────────────────────────────────────────────
     doc.font(FONT_BOLD).fontSize(22).fillColor(BLACK)
@@ -224,12 +238,18 @@ function writePDF(cvText, outputPath) {
       // ── Skill line: "Category: content text" ───────────────────────────
       // Only match if not a heading and starts with a capitalised word before colon
       const skillMatch = !isHeading && !isJobEntry && !isEduEntry && !isBullet &&
-        trimmed.match(/^([A-Z][A-Za-z ,&\/()-]{2,40}):\s+(.{5,})$/);
+        trimmed.match(/^([A-Z][A-Za-z0-9 ,&\/()-]{2,40}):\s+(.{5,})$/);
+
+      // Skip "Additional Skills & Competencies" skill lines — these are keyword dumps
+      // from the original CV that look unprofessional appended at the bottom
+      if (skillMatch && /^additional\s+skills/i.test(skillMatch[1])) continue;
 
       if (isHeading) {
-        currentSection = trimmed;
+        // Map jammed headings (e.g. "WORKEXPERIENCE" → "WORK EXPERIENCE") for display
+        const displayHeading = HEADING_MAP[trimmed.replace(/\s/g, '')] || trimmed;
+        currentSection = displayHeading;
         doc.moveDown(0.6);
-        doc.font(FONT_BOLD).fontSize(10.5).fillColor(BLUE).text(trimmed);
+        doc.font(FONT_BOLD).fontSize(10.5).fillColor(BLUE).text(displayHeading);
         doc.moveDown(0.08);
         drawRule(doc, L, L + W);
         doc.moveDown(0.4);
@@ -281,20 +301,21 @@ function writePDF(cvText, outputPath) {
         }
 
       } else if (isBullet) {
-        const text = trimmed.replace(/^[•\-–]\s*/, '');
-        // pdfkit's list() is the only reliable way to get hanging-indent wrap alignment.
-        // bulletIndent = bullet x offset from L; textIndent = text x offset from L.
-        // Wrapped continuation lines stay at textIndent, not the page margin.
+        const text  = trimmed.replace(/^[•\-–]\s*/, '');
+        const textW = W - 18;
+        // If this bullet won't fit on the remaining page, start a new page first
+        // so the bullet and its text always start on the same page
+        const textH = doc.heightOfString(text, { width: textW, lineGap: 2 });
+        const spaceLeft = doc.page.height - doc.page.margins.bottom - doc.y;
+        if (textH > spaceLeft) doc.addPage();
+        const bulletX = L + 8;
+        const textX   = L + 18;
+        // Draw bullet symbol manually then place text so indentation is consistent
         doc.font(FONT).fontSize(9.5).fillColor(GRAY)
-           .list([text], L, doc.y, {
-             listType:     'bullet',
-             bulletRadius: 1.5,
-             bulletIndent: 10,
-             textIndent:   20,
-             width:        W,
-             lineGap:      2,
-             paragraphGap: 0,
-           });
+           .text('•', bulletX, doc.y, { width: 10, lineGap: 2 });
+        const lineH = doc.currentLineHeight(true);
+        doc.font(FONT).fontSize(9.5).fillColor(GRAY)
+           .text(text, textX, doc.y - lineH, { width: textW, lineGap: 2 });
         doc.x = L;
         doc.moveDown(0.06);
 
@@ -323,7 +344,7 @@ function buildPaths(savedDir, uploadDir, uploadFilename, jobTitle, company, scor
 
   const date   = new Date().toISOString().slice(0, 10);
   const safe   = s => s.replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s+/g, '_').substring(0, 40);
-  const saved  = path.join(savedDir,  `Femi_Merit_${safe(jobTitle)}_${safe(company)}_${score}pct_${date}.pdf`);
+  const saved  = path.join(savedDir,  `${safe(jobTitle)}_${safe(company)}_${score}pct_${date}.pdf`);
   const upload = path.join(uploadDir, uploadFilename);
   return { saved, upload };
 }

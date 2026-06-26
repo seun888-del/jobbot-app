@@ -52,7 +52,7 @@ const cfg = {
   LOCATION: 'United Kingdom',
   CONTRACT_TYPE: 'any',
   SKIP_EXTERNAL_SITES: true,
-  MAX_APPLICATIONS_PER_DAY: 15,
+  MAX_APPLICATIONS_PER_DAY: 50,
   MIN_SCORE: 0,
   SCHEDULE_ENABLED: false,
   SCHEDULE_DAYS: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'],
@@ -134,7 +134,7 @@ const cfg = {
       cfg.JOB_AGE = prefs.job_age || 'r1209600';
 
       cfg.SKIP_EXTERNAL_SITES = !!profile.skip_external_sites;
-      cfg.MAX_APPLICATIONS_PER_DAY = profile.max_applications_per_day ?? 15;
+      cfg.MAX_APPLICATIONS_PER_DAY = Math.max(profile.max_applications_per_day ?? 50, cfg.MAX_APPLICATIONS_PER_DAY);
       cfg.MIN_SCORE = profile.min_match_score ?? 0;
 
       cfg.SCHEDULE_ENABLED = !!(prefs.schedule_enabled);
@@ -147,6 +147,21 @@ const cfg = {
     } finally {
       db.close();
     }
+  },
+
+  // Detect training course listings from extracted description text and/or title.
+  // Used by all bots after JD extraction — title-level check alone isn't enough
+  // because most training listings have generic titles like "IT Support Technician".
+  isTrainingCourseJD(description, title) {
+    const d = (description || '').toLowerCase();
+    const t = (title || '').toLowerCase();
+    // Title contains "training course" or "training programme" explicitly
+    if (/training course|training programme/.test(t)) return true;
+    // Reed salary field shows "£ Training Course" in the raw page text
+    if (/£\s*training/i.test(description || '')) return true;
+    // Common JD phrases that only appear in course listings, not real jobs
+    if (/this is a training|fully.?funded training|funded training course|pay for your (own )?training|enrol(l?) (on|onto) (this|the|a) (course|programme)|no experience needed.*training provided/.test(d)) return true;
+    return false;
   },
 };
 

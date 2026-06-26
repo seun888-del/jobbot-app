@@ -1,6 +1,7 @@
 const fs      = require("fs");
 const path    = require("path");
 const pdfParse = require("pdf-parse");
+const mammoth  = require("mammoth");
 
 // Score a CV against a job description using keyword frequency
 function scoreCV(cv, jdText) {
@@ -40,6 +41,32 @@ async function extractPdfText(filePath) {
   return data.text;
 }
 
+// Extract plain text from a .docx file preserving bullet structure as • markers
+async function extractDocxText(filePath) {
+  const result = await mammoth.convertToHtml({ path: filePath });
+  let html = result.value;
+  // Convert list items to • bullets before stripping tags
+  html = html.replace(/<li>/gi, '\n• ').replace(/<\/li>/gi, '');
+  html = html.replace(/<ul[^>]*>/gi, '\n').replace(/<\/ul>/gi, '\n');
+  html = html.replace(/<ol[^>]*>/gi, '\n').replace(/<\/ol>/gi, '\n');
+  // Paragraph breaks
+  html = html.replace(/<\/p>/gi, '\n\n').replace(/<p[^>]*>/gi, '');
+  // Strip remaining HTML tags
+  html = html.replace(/<[^>]+>/g, '');
+  // Decode common HTML entities
+  html = html.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ');
+  // Normalise whitespace
+  html = html.replace(/\n{3,}/g, '\n\n').trim();
+  return html;
+}
+
+// Extract text from either PDF or docx based on file extension
+async function extractCVText(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.docx' || ext === '.doc') return extractDocxText(filePath);
+  return extractPdfText(filePath);
+}
+
 // Prepare the output resume: copy selected PDF to output dir, rename it
 function prepareResume(selectedCV, outputDir, filename) {
   const dest = path.join(outputDir, filename);
@@ -48,4 +75,4 @@ function prepareResume(selectedCV, outputDir, filename) {
   return dest;
 }
 
-module.exports = { scoreCV, selectBestCV, extractPdfText, prepareResume };
+module.exports = { scoreCV, selectBestCV, extractPdfText, extractDocxText, extractCVText, prepareResume };

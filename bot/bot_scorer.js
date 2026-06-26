@@ -5,23 +5,24 @@
  * For each:
  *   0. Pre-filter: skip jobs mismatched on level, type, or salary
  *   1. Select the best-matching CV
- *   2. Clean CV text
- *   3. Tailor CV — 4-step AI process (profile, bullets, skills rebuild, quantification)
- *   4. Score CV against JD keywords
- *   5. Inline keyword weaving — weaves missing keywords naturally into bullets/skills
- *   6. Addendum fallback — only for any keywords still missing after weaving
- *   7. Write PDF, generate targeted cover letter, set queue entry to "cv_ready"
+ *   2. Score original CV text against JD keywords (no AI rewriting)
+ *   3. Addendum fallback — append missing keywords for ATS if score < target
+ *   4. Copy original uploaded CV file directly (no docx reconstruction)
+ *   5. Generate targeted cover letter, set queue entry to "cv_ready"
  */
 
 const path       = require('path');
+const fs         = require('fs');
 const cfg        = require('./config');
 const cvSelector = require('./modules/cv_selector');
 const cvScorer   = require('./modules/cv_scorer');
 const queue      = require('./modules/queue_manager');
-const { cleanText }               = require('./modules/cv_cleaner');
-const { writePDF, buildPaths }    = require('./modules/cv_pdf_writer');
-const { tailorCV, weaveKeywords } = require('./modules/cv_tailor');
-const { generateCoverLetter }     = require('./modules/cover_letter');
+const { cleanText }                   = require('./modules/cv_cleaner');
+const { writePDF, buildPaths }        = require('./modules/cv_pdf_writer');
+const { writeDocx }                   = require('./modules/cv_docx_writer');
+const { convertDocxToPdf }            = require('./modules/cv_converter');
+const { tailorCV, weaveKeywords }     = require('./modules/cv_tailor');
+const { generateCoverLetter }         = require('./modules/cover_letter');
 const { llmAvailable, mode: llmMode } = require('../src/services/llm');
 
 const QUICK_FAIL_THRESHOLD = 35;
@@ -102,62 +103,33 @@ function passesPreFilter(job) {
   return { pass: true };
 }
 
-async function scoreWithBoost(cv, jdText, jobTitle) {
-  const raw         = await cvSelector.extractPdfText(cv.path);
+async function scoreWithBoost(cv, jdText) {
+  const raw         = await cvSelector.extractCVText(cv.path);
   const cleanedText = cleanText(raw);
 
-  // Tailor CV — 4-step AI process (profile, bullets, skills rebuild, quantification)
-  let tailoredText = cleanedText;
-  try {
-    console.log(`  [Scorer Bot] Tailoring CV (4 steps) for: ${jobTitle}`);
-    tailoredText = await tailorCV(cleanedText, jobTitle, jdText);
-  } catch (err) {
-    console.warn(`  [Scorer Bot] Tailoring failed (${err.message}) — using raw CV`);
-  }
-
-  // Score tailored CV against JD keywords
+  // Score original CV against JD keywords — no AI rewriting
   let score, missingKeywords, allKeywords;
   try {
-    ({ score, missingKeywords, allKeywords } = await cvScorer.scoreCV(tailoredText, jdText));
+    ({ score, missingKeywords, allKeywords } = await cvScorer.scoreCV(cleanedText, jdText));
   } catch (err) {
     console.warn(`  [Scorer Bot] Scoring failed (${err.message}) — fallback score 85`);
-    return { score: 85, cvText: tailoredText };
+    return { score: 85, cvText: cleanedText };
   }
 
-  let cvText = tailoredText;
-  console.log(`  [Scorer Bot] Post-tailor score: ${score}% — ${cv.name}`);
+  console.log(`  [Scorer Bot] Score: ${score}% — ${cv.name}`);
 
   if (score > 0 && score < QUICK_FAIL_THRESHOLD) {
     console.log(`  [Scorer Bot] ${score}% below quick-fail threshold — skipping this CV`);
-    return { score, cvText };
+    return { score, cvText: cleanedText };
   }
 
-  // Pass 1: Inline keyword weaving — weaves missing keywords naturally into bullets/skills
+  // Addendum: append missing keywords at the bottom for ATS (no rewriting of CV body)
+  let cvText = cleanedText;
   if (score < BOOST_TARGET && missingKeywords.length > 0) {
-    console.log(`  [Scorer Bot] ${score}% — weaving ${missingKeywords.length} missing keywords inline...`);
-    try {
-      const woven = await weaveKeywords(cvText, missingKeywords, jdText);
-      if (woven !== cvText) {
-        const rescore = cvScorer.rescoreCV(woven, allKeywords);
-        console.log(`  [Scorer Bot] Inline weave: ${score}% → ${rescore.score}%`);
-        if (rescore.score >= score) {
-          cvText          = woven;
-          score           = rescore.score;
-          missingKeywords = rescore.missingKeywords;
-        }
-      }
-    } catch (err) {
-      console.warn(`  [Scorer Bot] Keyword weave error: ${err.message}`);
-    }
-  }
-
-  // Pass 2: Addendum fallback — only fires if keywords are still missing after weaving
-  if (score < BOOST_TARGET && missingKeywords.length > 0) {
-    console.log(`  [Scorer Bot] ${score}% — addendum fallback for ${missingKeywords.length} remaining keywords`);
-    cvText = boostCVText(cvText, missingKeywords);
-    const rescore   = cvScorer.rescoreCV(cvText, allKeywords);
-    score           = rescore.score;
-    missingKeywords = rescore.missingKeywords;
+    console.log(`  [Scorer Bot] ${score}% — adding ${missingKeywords.length} missing keywords via addendum`);
+    cvText = boostCVText(cleanedText, missingKeywords);
+    const rescore = cvScorer.rescoreCV(cvText, allKeywords);
+    score = rescore.score;
     console.log(`  [Scorer Bot] After addendum: ${score}%`);
   }
 
@@ -192,7 +164,7 @@ async function processJob(job) {
   const bestCV   = cvSelector.selectBestCV(job.description, cfg.CVS);
   const jobTitle = job.title.split('\n')[0].trim();
 
-  let { score, cvText: boostedText } = await scoreWithBoost(bestCV, job.description, jobTitle);
+  let { score, cvText: boostedText } = await scoreWithBoost(bestCV, job.description);
   let bestScore  = score;
   let bestCvText = boostedText;
   let bestCvName = bestCV.name;
@@ -207,7 +179,7 @@ async function processJob(job) {
 
     for (const altCV of others) {
       console.log(`\n  [Scorer Bot] ${score}% — trying next CV: ${altCV.name}`);
-      const result = await scoreWithBoost(altCV, job.description, jobTitle);
+      const result = await scoreWithBoost(altCV, job.description);
 
       if (result.score > bestScore) {
         bestScore  = result.score;
@@ -220,28 +192,55 @@ async function processJob(job) {
   }
 
   if (bestScore >= cfg.MIN_SCORE) {
-    const paths = buildPaths(path.join(cfg.OUTPUT_DIR, 'saved_cvs'), cfg.OUTPUT_DIR, cfg.RESUME_FILENAME, job.title, job.company, bestScore);
-    await writePDF(bestCvText, paths.saved);
-    await writePDF(bestCvText, paths.upload);
+    const paths    = buildPaths(path.join(cfg.OUTPUT_DIR, 'saved_cvs'), cfg.OUTPUT_DIR, cfg.RESUME_FILENAME, job.title, job.company, bestScore);
+    const bestCVObj = cfg.CVS.find(c => c.name === bestCvName) || cfg.CVS[0];
+    const isDocx    = bestCVObj && /\.docx?$/i.test(bestCVObj.path);
+
+    // Copy the original uploaded CV file directly — no AI rewriting
+    const savedDir = path.dirname(paths.saved);
+    if (!fs.existsSync(savedDir)) fs.mkdirSync(savedDir, { recursive: true });
+
+    if (isDocx) {
+      const docxPath = paths.saved.replace(/\.pdf$/i, '.docx');
+      fs.copyFileSync(bestCVObj.path, docxPath);
+      try {
+        await convertDocxToPdf(docxPath, paths.saved);
+        await convertDocxToPdf(docxPath, paths.upload);
+        console.log(`  [Scorer Bot] ✓ Original docx→PDF: ${paths.saved}`);
+      } catch (err) {
+        console.warn(`  [Scorer Bot] docx→PDF failed (${err.message}) — using pdfkit fallback`);
+        const fullName = `${cfg.APPLICANT.firstName} ${cfg.APPLICANT.lastName}`.trim();
+        const pdfOpts  = fullName ? { overrideName: fullName } : {};
+        await writePDF(bestCvText, paths.saved, pdfOpts);
+        await writePDF(bestCvText, paths.upload, pdfOpts);
+      }
+    } else {
+      // PDF: copy original file directly
+      fs.copyFileSync(bestCVObj.path, paths.saved);
+      fs.copyFileSync(bestCVObj.path, paths.upload);
+    }
+
     const flag = bestScore >= BOOST_TARGET ? '✓' : '~';
     console.log(`  [Scorer Bot] ${flag} ${bestCvName} → ${bestScore}% | PDF: ${paths.saved}`);
 
-    // Generate tailored cover letter
-    let coverLetter = null;
-    try {
-      coverLetter = await generateCoverLetter(jobTitle, job.company, job.description, bestCvText);
-      if (coverLetter) console.log(`  [Scorer Bot] ✓ Cover letter generated (${coverLetter.length} chars)`);
-    } catch (err) {
-      console.warn(`  [Scorer Bot] Cover letter generation failed: ${err.message}`);
-    }
-
+    // Mark cv_ready immediately — don't block on cover letter generation
     queue.update(job.jobId, {
-      status:      'cv_ready',
-      cvPath:      paths.saved,
-      cvScore:     bestScore,
-      cvName:      bestCvName,
-      coverLetter: coverLetter,
+      status:  'cv_ready',
+      cvPath:  paths.saved,
+      cvScore: bestScore,
+      cvName:  bestCvName,
     });
+
+    // Generate cover letter in background — updates queue when done
+    generateCoverLetter(jobTitle, job.company, job.description, bestCvText)
+      .then(coverLetter => {
+        if (coverLetter) {
+          queue.update(job.jobId, { coverLetter });
+          console.log(`  [Scorer Bot] ✓ Cover letter ready for: ${job.title}`);
+        }
+      })
+      .catch(err => console.warn(`  [Scorer Bot] Cover letter failed: ${err.message}`));
+
     return;
   }
 
@@ -313,7 +312,7 @@ async function main() {
         console.error(`  [Scorer Bot] Error on "${job.title}": ${err.message}`);
         queue.update(job.jobId, { status: 'failed', error: err.message });
       }
-      await DELAY(5000); // 5s between jobs to avoid rate limits
+      await DELAY(500); // brief pause between jobs
     }
   }
 }

@@ -24,7 +24,7 @@ async function generateCoverLetter(jobTitle, company, jobDescription, cvText) {
   const jdExcerpt = (jobDescription || '').substring(0, 2500);
   const cvExcerpt = (cvText || '').substring(0, 2000);
 
-  const prompt = `Write a targeted, high-impact cover letter that will get this candidate an interview.
+  const prompt = `Write a short, targeted cover letter that reads like it was written specifically for this job — not templated.
 
 CANDIDATE: ${fullName} — ${yearsText} experience${levelNote}${availNote}
 ROLE: ${jobTitle}
@@ -37,39 +37,36 @@ CANDIDATE CV:
 ${cvExcerpt}
 
 ─────────────────────────────────────────────
-
-STEP 1 — Silently analyse (do not output this analysis):
-• What are the 3 most important requirements in this JD?
-• Which specific achievement or skill from the CV best addresses each requirement?
-• What is one specific thing about this role or company that makes it genuinely compelling?
-
-STEP 2 — Write the letter:
-
-Write a 3-paragraph cover letter body ONLY (no date, no address, no "Dear Hiring Manager", no sign-off, no name).
-
-PARAGRAPH 1 — HOOK (2–3 sentences):
-Open with a confident statement that immediately connects the candidate's strongest relevant achievement to the role's single most critical requirement. Name the role and the company.
-
-BANNED openers — if your first sentence starts with any of these, rewrite it:
-❌ "I am writing to..."   ❌ "I would like to apply..."
-❌ "I am interested in..."   ❌ "With X years of experience..."
-❌ "As a..."   ❌ "I am excited to..."
-
-PARAGRAPH 2 — EVIDENCE (3–5 sentences):
-Cite 2–3 concrete, specific achievements from the CV that directly match what this JD is asking for. For each, connect it explicitly to the employer's stated requirement. Include numbers and metrics where the CV has them. Do NOT use generic statements.
-
-PARAGRAPH 3 — CLOSE (2 sentences):
-Express genuine enthusiasm for this specific role and company — not "any opportunity". State readiness for interview.
+SILENT PRE-WORK (do not output):
+1. What are the 2–3 most important requirements in the JD?
+2. Which specific experience or achievement from the CV best proves each one?
+3. What does the JD reveal about this company or role that makes it specific — a challenge they mention, a team they describe, a tool they emphasise?
 
 ─────────────────────────────────────────────
-RULES — non-negotiable:
-- Maximum 220 words total
-- Every sentence must be specific to this job — cut anything that could apply to any application
-- BANNED words/phrases: "passionate", "team player", "results-driven", "hard-working", "go-getter", "leveraging", "spearheading", "seamlessly", "proactive", "dynamic", "I am a fast learner", "hit the ground running", "self-motivated"
+OUTPUT — 4 paragraphs, no headings, no labels, no sign-off, no "Dear Hiring Manager":
+
+PARAGRAPH 1 — HOOK (2 sentences):
+Sentence 1: name the role and company in a confident, specific opening — NOT "I am writing to apply". Lead with the candidate's most relevant strength or achievement connected to the role's #1 requirement.
+Sentence 2: say one concrete thing about why this specific role or company — pulled from what the JD actually says (a challenge, a mission, a technology) — not generic enthusiasm.
+
+PARAGRAPH 2 — MATCH (3 sentences):
+Take the top 3 requirements from the JD. For each, write one sentence that maps it directly to a specific skill or experience from the CV. Be explicit: "[JD requirement] — [candidate proof point from CV]". No vague claims.
+
+PARAGRAPH 3 — EVIDENCE (2 sentences):
+State one concrete, quantified achievement from the CV. Explain in one sentence exactly why it proves the candidate can do this job.
+
+PARAGRAPH 4 — CLOSE (1 sentence only):
+Genuine, specific enthusiasm for this role. End with a clear ask for the interview.
+
+─────────────────────────────────────────────
+HARD RULES:
+- 230 words maximum total
+- Every sentence must be specific to THIS job — cut anything that could appear in any other cover letter
+- BANNED openers: "I am writing to", "I would like to apply", "I am interested in", "With X years", "As a", "I am excited to", "I am passionate"
+- BANNED words: "passionate", "team player", "results-driven", "hard-working", "go-getter", "leveraging", "spearheading", "seamlessly", "proactive", "dynamic", "fast learner", "hit the ground running", "self-motivated"
 - Do NOT invent experience not in the CV
 - Do NOT mention salary
-- Write as a confident professional — not as someone begging for a chance
-- Return ONLY the 3 paragraph body — nothing else, no labels, no headings`;
+- Return ONLY the 4 paragraph body — nothing else`;
 
   try {
     const letter = await llmChat(prompt);

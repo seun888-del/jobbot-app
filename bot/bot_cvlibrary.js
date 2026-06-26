@@ -12,7 +12,7 @@ const queue   = require('./modules/queue_manager');
 const logger  = require('./modules/logger');
 const salary  = require('./modules/salary_filter');
 const stealth = require('./modules/stealth');
-const { launchPersistentContext, humanWarmup, waitForCloudflareSolve } = require('./modules/browser_launcher');
+const { launchPersistentContext, connectToRunningChrome, humanWarmup, waitForCloudflareSolve } = require('./modules/browser_launcher');
 const path    = require('path');
 
 const DELAY         = ms => new Promise(r => setTimeout(r, ms));
@@ -47,8 +47,9 @@ function workTypePriority() {
 // ── Login ─────────────────────────────────────────────────────────────────
 async function ensureLoggedIn(page) {
   await page.goto('https://www.cv-library.co.uk/', { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await waitForCloudflareSolve(page);
-  await DELAY(2000);
+  // Give Cloudflare challenge extra time — cv-library.co.uk uses a slow JS challenge
+  await waitForCloudflareSolve(page, { maxWaitMs: 45000 });
+  await DELAY(3000);
   const isLoggedIn = await page.evaluate(() => {
     const text = (document.body?.innerText || '').toLowerCase();
     return text.includes('my dashboard') || text.includes('my profile') ||
@@ -56,7 +57,7 @@ async function ensureLoggedIn(page) {
            text.includes('log out') || text.includes('my cv');
   }).catch(() => false);
   if (!isLoggedIn) {
-    throw new Error('CV-Library: not logged in. Go to Job Site Login → click Connect CV-Library Account → log in → close the Chrome window → then start this bot.');
+    throw new Error('CV-Library: not logged in. Click "Connect account" on the CV-Library card, log in, then click Start.');
   }
   console.log('  [CV-Library Bot] Session active');
 }
@@ -70,7 +71,7 @@ async function acceptCookies(page) {
 }
 
 // ── Phase 1: Search & queue ───────────────────────────────────────────────
-async function phase1_searchAndQueue(page) {
+async function phase1_searchAndQueue(context, page) {
   console.log('\n══════════════════════════════════════════════════════');
   console.log('  [CV-Library Bot] Phase 1 — Searching for jobs');
   console.log('══════════════════════════════════════════════════════');
@@ -92,7 +93,7 @@ async function phase1_searchAndQueue(page) {
     try {
       // CV-Library's new Next.js site requires using the search form, not query params
       await page.goto(`${BASE_URL}/search-jobs`, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      const passed = await waitForCloudflareSolve(page);
+      const passed = await waitForCloudflareSolve(page, { maxWaitMs: 45000 });
       if (!passed) {
         console.error('');
         console.error('  ════════════════════════════════════════════════════');
@@ -152,7 +153,6 @@ async function phase1_searchAndQueue(page) {
       if (queue.wasApplied(jobId)) { console.log(`  [CV-Library Bot] Already applied — skipping: ${title}`); continue; }
       if (!isRelevantTitle(title)) { console.log(`  [CV-Library Bot] Title filter — skipping: ${title}`); continue; }
       if (isBlockedCompany(company)) { console.log(`  [CV-Library Bot] Company blocked — skipping: ${title} @ ${company}`); continue; }
-      if (queue.wasAppliedToCompanyRecently(company)) { console.log(`  [CV-Library Bot] Applied to ${company} in last 30 days — skipping: ${title}`); continue; }
       if (queue.hasCanonical(title, company)) { console.log(`  [CV-Library Bot] Duplicate (cross-site) — skipping: ${title} @ ${company}`); continue; }
 
       // Skip if apply URL points to an external site
@@ -181,6 +181,12 @@ async function phase1_searchAndQueue(page) {
           continue;
         }
 
+        if (cfg.isTrainingCourseJD(description, title)) {
+          console.log(`  [CV-Library Bot] Training course — skipping: ${title}`);
+          queue.add({ jobId, title, company, url, source: 'cvlibrary', status: 'skipped', reason: 'Training course' });
+          continue;
+        }
+
         if (cfg.APPLICANT.seekSponsorship) {
           if (!/visa sponsor|sponsorship|skilled worker|tier 2|work permit/i.test(description)) {
             console.log(`  [CV-Library Bot] No sponsorship — skipping: ${title}`);
@@ -189,17 +195,17 @@ async function phase1_searchAndQueue(page) {
           }
         }
 
-        if (!salary.isAcceptable(description, cfg.APPLICANT.salaryExpectation)) {
-          const min = salary.extractMinSalary(description);
-          console.log(`  [CV-Library Bot] Below salary (${min ? '£' + min.toLocaleString() : '?'}) — skipping: ${title}`);
-          queue.add({ jobId, title, company, url, source: 'cvlibrary', status: 'skipped', reason: 'Below salary expectation' });
-          continue;
-        }
-
         const workType = detectWorkType(description);
         if (!cfg.WORK_TYPE_PRIORITY.includes(workType)) {
           console.log(`  [CV-Library Bot] Work type "${workType}" not wanted — skipping: ${title}`);
           queue.add({ jobId, title, company, url, source: 'cvlibrary', status: 'skipped', reason: `Work type (${workType}) not wanted` });
+          continue;
+        }
+
+        if (!salary.isAcceptable(description, cfg.APPLICANT.salaryExpectation)) {
+          const min = salary.extractMinSalary(description);
+          console.log(`  [CV-Library Bot] Below salary (${min ? '£' + min.toLocaleString() : '?'}) — skipping: ${title}`);
+          queue.add({ jobId, title, company, url, source: 'cvlibrary', status: 'skipped', reason: 'Below salary expectation' });
           continue;
         }
 
@@ -215,6 +221,7 @@ async function phase1_searchAndQueue(page) {
 
   const pending = queue.getByStatus('pending').filter(j => j.source === 'cvlibrary').length;
   console.log(`\n  [CV-Library Bot] Phase 1 complete. ${pending} CV-Library job(s) queued for Scorer.`);
+  return page;
 }
 
 // ── Phase 2: Apply ────────────────────────────────────────────────────────
@@ -233,45 +240,32 @@ async function phase2_applyReadyCVs(page) {
     const readyJobs = queue.getByStatus('cv_ready')
       .filter(j => j.source === 'cvlibrary')
       .sort((a, b) => (priority[a.workType] ?? 99) - (priority[b.workType] ?? 99));
-
-    const pendingCount = [
+    const pendingJobs = [
       ...queue.getByStatus('pending').filter(j => j.source === 'cvlibrary'),
       ...queue.getByStatus('processing').filter(j => j.source === 'cvlibrary'),
     ].length;
 
-    if (!readyJobs.length && !pendingCount) {
-      idleCount++;
-      if (idleCount >= MAX_IDLE) {
-        console.log('  [CV-Library Bot] Queue exhausted — stopping.');
-        break;
-      }
-      console.log(`  [CV-Library Bot] Waiting for Scorer... (${idleCount}/${MAX_IDLE})`);
-      await DELAY(POLL_INTERVAL);
-      continue;
-    }
-    idleCount = 0;
-
     for (const job of readyJobs) {
       const appliedToday = queue.countAppliedToday();
       if (appliedToday >= cfg.MAX_APPLICATIONS_PER_DAY) {
-        console.log(`  [CV-Library Bot] Daily limit reached (${appliedToday}/${cfg.MAX_APPLICATIONS_PER_DAY}) — stopping.`);
+        console.log(`  [CV-Library Bot] Daily limit reached (${appliedToday}/${cfg.MAX_APPLICATIONS_PER_DAY}) — pausing until tomorrow`);
         return;
       }
 
       if (!isRelevantTitle(job.title)) {
         queue.update(job.jobId, { status: 'skipped', reason: 'Title filter (post-queue)' });
         logger.log(job.title, job.company, job.url, job.cvName || 'N/A', job.cvScore || 0, 'SKIPPED', 'Title filter');
+        console.log(`  [CV-Library Bot] Post-queue title filter — skipping: ${job.title}`);
         continue;
       }
 
       queue.update(job.jobId, { status: 'applying' });
-      console.log(`\n  [CV-Library Bot] Applying: ${job.title} @ ${job.company} (CV: ${job.cvName}, Score: ${job.cvScore}%)`);
+      console.log(`\n  [CV-Library Bot] Applying: ${job.title} @ ${job.company} [${job.workType || 'onsite'}] (CV: ${job.cvName}, Score: ${job.cvScore}%)`);
 
       try {
         await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
         await DELAY(2000);
 
-        // Click Apply / Quick Apply
         const applyBtn = await page.$('a:has-text("Quick Apply"), button:has-text("Apply Now"), a:has-text("Apply Now"), .apply-button');
         if (!applyBtn) {
           queue.update(job.jobId, { status: 'skipped', reason: 'Apply button not found' });
@@ -283,20 +277,12 @@ async function phase2_applyReadyCVs(page) {
         await applyBtn.click();
         await DELAY(2000);
 
-        // Fill cover letter if present
         const clField = await page.$('textarea[name*="cover"], textarea[name*="letter"], textarea[id*="cover"]');
-        if (clField && job.coverLetter) {
-          await clField.fill(job.coverLetter);
-        }
+        if (clField && job.coverLetter) await clField.fill(job.coverLetter);
 
-        // Submit
         const submitBtn = await page.$('button[type="submit"]:has-text("Apply"), button[type="submit"]:has-text("Submit"), input[type="submit"]');
-        if (submitBtn) {
-          await submitBtn.click();
-          await DELAY(3000);
-        }
+        if (submitBtn) { await submitBtn.click(); await DELAY(3000); }
 
-        // Check for confirmation
         const pageText = await page.textContent('body').catch(() => '');
         const success = /thank you|application (sent|received|submitted)|successfully applied/i.test(pageText);
 
@@ -311,37 +297,80 @@ async function phase2_applyReadyCVs(page) {
           console.log(`  [CV-Library Bot] No confirmation — marking failed: ${job.title}`);
         }
       } catch (err) {
-        queue.update(job.jobId, { status: 'apply_failed', reason: err.message });
-        logger.log(job.title, job.company, job.url, job.cvName || 'N/A', job.cvScore || 0, 'FAILED', err.message);
-        console.error(`  [CV-Library Bot] Error applying to "${job.title}": ${err.message}`);
+        const isPageIssue = /apply button not found|no apply button|external/i.test(err.message);
+        if (isPageIssue) {
+          queue.update(job.jobId, { status: 'skipped', reason: err.message });
+          logger.log(job.title, job.company, job.url, job.cvName || 'N/A', job.cvScore || 0, 'SKIPPED', err.message.substring(0, 100));
+          console.log(`  [CV-Library Bot] Page issue — skipping: ${job.title} (${err.message})`);
+        } else {
+          queue.update(job.jobId, { status: 'apply_failed', error: err.message });
+          logger.log(job.title, job.company, job.url, 'N/A', 0, 'ERROR', err.message.substring(0, 100));
+          console.error(`  [CV-Library Bot] Error applying to "${job.title}": ${err.message}`);
+        }
       }
 
-      await DELAY(3000);
+      const pause = 8000 + Math.random() * 7000;
+      console.log(`  [CV-Library Bot] Pausing ${Math.round(pause / 1000)}s before next application...`);
+      await DELAY(pause);
     }
 
-    if (!readyJobs.length) await DELAY(POLL_INTERVAL);
+    if (readyJobs.length > 0) {
+      idleCount = 0;
+    } else if (pendingJobs > 0) {
+      idleCount = 0;
+      try { queue.printStatus(); } catch (_) {}
+      console.log(`  [CV-Library Bot] Waiting for Scorer bot... (${pendingJobs} CV-Library job(s) in progress)`);
+    } else {
+      idleCount++;
+      console.log(`  [CV-Library Bot] Idle ${idleCount}/${MAX_IDLE} — no pending or ready CV-Library jobs`);
+    }
+
+    if (idleCount >= MAX_IDLE) break;
+    await DELAY(POLL_INTERVAL);
   }
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────
-(async () => {
+async function main() {
   await cfg.init();
   await queue.init(process.env.JOBBOT_USERDATA);
 
+  console.log('═══════════════════════════════════════════════════════');
+  console.log('  CV-Library Bot — Starting (continuous mode)');
+  console.log('═══════════════════════════════════════════════════════');
+
+  const stuckApplying = queue.getByStatus('applying').filter(j => j.source === 'cvlibrary');
+  if (stuckApplying.length > 0) {
+    console.log(`  [CV-Library Bot] Recovering ${stuckApplying.length} interrupted job(s) → cv_ready`);
+    for (const j of stuckApplying) queue.update(j.jobId, { status: 'cv_ready' });
+  }
+
   const profileDir = path.join(process.env.JOBBOT_USERDATA, 'cvlibrary_profile');
-  const context = await launchPersistentContext(profileDir);
+  const cdpPort = process.env.JOBBOT_CDP_PORT;
+  const context = cdpPort
+    ? await connectToRunningChrome(parseInt(cdpPort)).catch(() => launchPersistentContext(profileDir))
+    : await launchPersistentContext(profileDir);
   await stealth.applyToContext(context);
 
-  const page = await context.newPage();
-
+  let page = await context.newPage();
   try {
     await ensureLoggedIn(page);
-    await phase1_searchAndQueue(page);
-    await phase2_applyReadyCVs(page);
   } catch (err) {
-    console.error(`  [CV-Library Bot] Fatal error: ${err.message}`);
+    console.error('ERROR: ' + err.message);
+    await context.close().catch(() => {});
     process.exit(1);
-  } finally {
-    await context.close();
   }
-})();
+
+  while (true) {
+    page = await phase1_searchAndQueue(context, page);
+    await phase2_applyReadyCVs(page);
+    logger.printSummary();
+    console.log('\n  [CV-Library Bot] Cycle complete. Waiting 1 min before next search...');
+    await DELAY(60 * 1000);
+  }
+}
+
+main().catch(err => {
+  console.error('Fatal error:', err);
+  process.exit(1);
+});

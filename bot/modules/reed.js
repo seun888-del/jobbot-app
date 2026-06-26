@@ -1,8 +1,10 @@
-const cfg     = require('../config');
-const fs      = require('fs');
-const stealth = require('./stealth');
-const salary  = require('./salary_filter');
-const queue   = require('./queue_manager');
+const cfg       = require('../config');
+const fs        = require('fs');
+const stealth   = require('./stealth');
+const captcha   = require('./captcha_solver');
+const salary    = require('./salary_filter');
+const queue     = require('./queue_manager');
+const atsFiller = require('./ats_filler');
 
 const SSDIR        = cfg.SCREENSHOTS_DIR;
 const SESSION_FILE = cfg.SESSION_FILE;
@@ -47,30 +49,43 @@ async function login(browser, email, password) {
     console.log('  [Reed] Saved session expired — need to log in again.');
   }
 
-  // Session missing or expired — open login page for manual login
-  console.log('  [Reed] Opening login page — please enter your password in the browser window.');
+  // Session missing or expired — auto-fill credentials and submit
+  console.log('  [Reed] Opening login page...');
   await page.goto('https://secure.reed.co.uk/login', { waitUntil: 'load', timeout: 60000 });
   await DELAY(3000);
 
-  // Pre-fill email
+  // Auto-fill email
   try {
     const emailEl = await page.$('input[name="username"], input[id="username"], input[type="email"], input[name="email"]');
     if (emailEl && await emailEl.isVisible()) {
       await emailEl.click();
       await DELAY(300);
       await emailEl.fill(email);
-      console.log('  [Reed] Email pre-filled. Please enter your password and click Log In.');
+      console.log('  [Reed] Email filled.');
     }
   } catch (_) {}
 
-  console.log('  [Reed] ⏳ Waiting for you to complete login (up to 5 minutes)...');
+  // Auto-fill password and submit
+  try {
+    const passEl = await page.$('input[name="password"], input[type="password"]');
+    if (passEl && await passEl.isVisible()) {
+      await passEl.click();
+      await DELAY(300);
+      await passEl.fill(password);
+      console.log('  [Reed] Password filled.');
+      await DELAY(500);
+      await passEl.press('Enter');
+    }
+  } catch (_) {}
 
-  const deadline = Date.now() + 300000;
+  await DELAY(4000);
+  console.log('  [Reed] Waiting for login (up to 5 minutes — complete any CAPTCHA in the browser)...');
+
   let loggedIn = false;
+  const deadline = Date.now() + 300000;
   while (Date.now() < deadline) {
     const u = page.url();
     if (u.startsWith('https://www.reed.co.uk') && !u.includes('/login') && !u.includes('/authentication')) {
-      // Verify the page actually shows a logged-in state (not just the homepage unauthenticated)
       const authenticated = await page.evaluate(() => {
         const text = (document.body.innerText || '').toLowerCase();
         return text.includes('my reed') || text.includes('sign out') || text.includes('log out') ||
@@ -78,204 +93,277 @@ async function login(browser, email, password) {
       }).catch(() => false);
       if (authenticated) { loggedIn = true; break; }
     }
+    await captcha.autoSolve(page).catch(() => {});
     await DELAY(4000);
   }
 
-  if (!loggedIn) {
-    console.log('  [Reed] Login failed or timed out — check credentials in Job Site Login.');
-    await page.screenshot({ path: `${SSDIR}/reed_login_issue.png` }).catch(() => {});
-    throw new Error('Reed login timed out. Open Job Site Login in the app and check your credentials.');
-  }
+  if (!loggedIn) throw new Error('Reed login timed out — check credentials or complete the CAPTCHA.');
 
   await context.storageState({ path: SESSION_FILE });
   console.log('  [Reed] ✓ Logged in. Session saved — next run will skip login.');
   return page;
 }
 
+// ── ENSURE LOGGED IN ──────────────────────────────────────────────────────
+async function ensureLoggedIn(page) {
+  await page.goto('https://www.reed.co.uk', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await DELAY(2000);
+
+  // HTTP 431 means cookie headers are too large — clear all cookies and retry
+  const status = await page.evaluate(() => {
+    const bodyText = document.body?.innerText || '';
+    return bodyText.includes('HTTP ERROR 431') ? 431 : 0;
+  }).catch(() => 0);
+
+  if (status === 431) {
+    console.log('  [Reed] HTTP 431 (cookie headers too large) — clearing cookies and retrying...');
+    await page.context().clearCookies();
+    await page.goto('https://www.reed.co.uk', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await DELAY(2000);
+  }
+
+  const isLoggedIn = await page.evaluate(() => {
+    const t = (document.body?.innerText || '').toLowerCase();
+    return t.includes('my reed') || t.includes('sign out') || t.includes('log out') ||
+           !!document.querySelector('[href*="/my-reed"], [href*="/account"]');
+  }).catch(() => false);
+  if (!isLoggedIn) throw new Error('Reed: not logged in. Click "Connect account" on the Reed bot card first.');
+  console.log('  [Reed] Session active');
+}
+
 // ── SEARCH JOBS ────────────────────────────────────────────────────────────
-async function searchJobs(browser, page, searchTerm, limit = 25, remoteOnly = false) {
-  // Recover from a closed page (Reed can close tabs via anti-bot redirects)
+async function searchJobs(context, page, searchTerm, limit = 25, remoteOnly = false) {
   if (page.isClosed()) {
     console.log('  [Reed] Page was closed — opening new tab');
-    page = await browser.newPage();
+    page = await context.newPage();
     page.setDefaultTimeout(30000);
   }
 
   const encoded = encodeURIComponent(searchTerm);
   const REED_AGE = { r86400: 'LastDay', r259200: 'LastThreeDays', r604800: 'LastWeek', r1209600: 'LastTwoWeeks', r2592000: 'LastMonth' };
   const ageParam = cfg.JOB_AGE && cfg.JOB_AGE !== 'any' ? `&datecreatedoffset=${REED_AGE[cfg.JOB_AGE] || 'LastTwoWeeks'}` : '';
-  const url = `https://www.reed.co.uk/jobs?keywords=${encoded}&sortby=DisplayDate${ageParam}`;
+  const baseUrl  = `https://www.reed.co.uk/jobs?keywords=${encoded}&sortby=DisplayDate${ageParam}`;
 
   console.log(`\n  [Reed] Searching: "${searchTerm}"`);
-  await page.goto(url, { waitUntil: 'load', timeout: 60000 });
-  await DELAY(4000);
 
-  // Dismiss cookie banner if present
-  try {
-    await page.click('#onetrust-accept-btn-handler, button:has-text("Accept all"), button:has-text("Accept cookies")', { timeout: 3000 });
-    await DELAY(1000);
-  } catch (_) {}
+  const allJobs  = [];
+  let pageNo     = 1;
+  let cookieDone = false;
 
-  // Scroll to load more results
-  for (let i = 0; i < 3; i++) {
-    await page.evaluate(() => window.scrollBy(0, 800));
-    await DELAY(800);
+  while (allJobs.length < limit) {
+    const url = pageNo === 1 ? baseUrl : `${baseUrl}&pageno=${pageNo}`;
+
+    // domcontentloaded is enough — Reed jobs are server-rendered in the initial HTML
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+    // Handle HTTP 431 (cookie headers too large)
+    const is431 = await page.evaluate(() => (document.body?.innerText || '').includes('HTTP ERROR 431')).catch(() => false);
+    if (is431) {
+      console.log('  [Reed] HTTP 431 — clearing cookies and reloading...');
+      await page.context().clearCookies();
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    }
+
+    // Dismiss cookie banner once — don't block if it never appears
+    if (!cookieDone) {
+      await page.click('#onetrust-accept-btn-handler, button:has-text("Accept all"), button:has-text("Accept cookies")', { timeout: 3000 }).catch(() => {});
+      cookieDone = true;
+    }
+
+    // Wait for cards or a "no results" indicator — avoids fixed sleep
+    await page.waitForSelector(
+      'article[data-id], [data-gtm-class="job-listing"], [data-testid="job-card"], .no-results, [class*="no-result"]',
+      { timeout: 12000 }
+    ).catch(() => {});
+
+    if (pageNo === 1) {
+      await page.screenshot({ path: `${SSDIR}/reed_search_results.png` });
+      console.log(`  [Reed] URL: ${page.url()}`);
+    }
+
+    const pageJobs = await page.evaluate(() => {
+      // Reed's primary card selector — numeric data-id is always present
+      let cards = Array.from(document.querySelectorAll('article[data-id]'));
+      if (cards.length === 0) {
+        for (const sel of ['[data-gtm-class="job-listing"]', '[data-testid="job-card"]', '.job-result']) {
+          cards = Array.from(document.querySelectorAll(sel));
+          if (cards.length > 0) break;
+        }
+      }
+
+      return cards.map(card => {
+        const dataId  = card.getAttribute('data-id') || '';
+        const titleEl = card.querySelector('h2 a, h3 a, [class*="title"] a, [data-testid="job-title"] a');
+        const href    = titleEl?.getAttribute('href') || card.querySelector('a[href*="/jobs/"]')?.getAttribute('href') || '';
+        const idFromHref = href.match(/\/(\d+)\/?(?:[?#]|$)/)?.[1] || '';
+
+        // Reed shows company as "X days ago by CompanyName" — extract after "by "
+        // Also try class-based selectors as backup
+        let company = '';
+        const companyEl = card.querySelector(
+          '[data-qa="employer-name"], [data-testid="employer-name"], a[data-gtm="employer"], ' +
+          'a[data-gtm="company"], .recruiter, .employer, [class*="employer"], ' +
+          'a[href*="/employers/"], .gtmJobListingPostedBy'
+        );
+        if (companyEl) {
+          company = companyEl.innerText.replace(/\s+/g, ' ').trim();
+        }
+        if (!company) {
+          // Parse "X days ago by CompanyName" from card text
+          const cardText = card.innerText || '';
+          const m = cardText.match(/\bby\s+([^\n\r]+)/i);
+          if (m) company = m[1].trim().split(/\s{2,}/)[0].trim();
+        }
+
+        return {
+          jobId:   'reed_' + (dataId || idFromHref),
+          title:   (titleEl?.innerText || '').trim() || 'Unknown',
+          company: company || 'Unknown',
+          url:     href ? (href.startsWith('http') ? href : 'https://www.reed.co.uk' + href) : '',
+        };
+      }).filter(j => j.url && j.jobId !== 'reed_');
+    });
+
+    if (pageJobs.length === 0) {
+      console.log(`  [Reed] Page ${pageNo}: no cards — end of results`);
+      break;
+    }
+    console.log(`  [Reed] Page ${pageNo}: ${pageJobs.length} cards`);
+    allJobs.push(...pageJobs);
+    pageNo++;
+    // Reed pages hold ~25 jobs; fewer than 15 means we're on the last page
+    if (pageJobs.length < 15) break;
+    await DELAY(1500);
   }
 
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await page.waitForTimeout(500);
-  await page.screenshot({ path: `${SSDIR}/reed_search_results.png` });
-
-  // Dump page title + URL for debugging
-  const pageTitle = await page.title();
-  console.log(`  [Reed] Page: "${pageTitle}" | URL: ${page.url()}`);
-
-  const jobs = await page.evaluate((lim) => {
-    // Dump first 5 article tags to help diagnose selector issues
-    const allArticles = Array.from(document.querySelectorAll('article')).slice(0, 5);
-    console.log('[Reed debug] articles found:', allArticles.length,
-      allArticles.map(a => a.className + ' | data-id=' + a.getAttribute('data-id')).join(' :: '));
-
-    // Reed job card selectors — broad fallback chain
-    const cardSelectors = [
-      'article[data-id]',
-      '[data-gtm-class="job-listing"]',
-      '[data-testid="job-card"]',
-      '.job-result',
-      '.j-search-result',
-      'article[class*="job"]',
-      'article',
-    ];
-    let cards = [];
-    for (const sel of cardSelectors) {
-      cards = Array.from(document.querySelectorAll(sel));
-      if (cards.length > 2) break;
-    }
-    cards = cards.slice(0, lim);
-
-    return cards.map(card => {
-      const titleEl   = card.querySelector(
-        'h2 a, h3 a, .title a, [data-testid="job-title"] a, a[data-gtm="job-title"], a[class*="title"]'
-      );
-      const companyEl = card.querySelector(
-        '.recruiter, .employer, [data-testid="employer-name"], .gtmJobListingPostedBy, a[data-gtm="company"], [class*="company"]'
-      );
-      const linkEl    = card.querySelector('a[href*="/jobs/"]');
-      const dataId    = card.getAttribute('data-id') || '';
-
-      const href  = (titleEl || linkEl) ? ((titleEl || linkEl).getAttribute('href') || '') : '';
-      const idFromHref = href.match(/\/jobs\/(\d+)\//)?.[1] || '';
-      const jobId = 'reed_' + (dataId || idFromHref);
-
-      return {
-        title:   titleEl   ? titleEl.innerText.trim()   : 'Unknown',
-        company: companyEl ? companyEl.innerText.trim() : 'Unknown',
-        url:     href ? (href.startsWith('http') ? href : 'https://www.reed.co.uk' + href) : '',
-        jobId,
-      };
-    }).filter(j => j.url && j.jobId !== 'reed_');
-  }, limit);
-
-  console.log(`  [Reed] Found ${jobs.length} jobs for "${searchTerm}"`);
-  return { jobs, page };  // return updated page in case it was recreated
+  const jobs = allJobs.slice(0, limit);
+  console.log(`  [Reed] Found ${jobs.length} jobs for "${searchTerm}" (${pageNo - 1} page(s))`);
+  return { jobs, page };
 }
 
 // ── GET JOB DESCRIPTION ────────────────────────────────────────────────────
 async function getJobDescription(page, job) {
-  await page.goto(job.url, { waitUntil: 'networkidle', timeout: 60000 });
-  await DELAY(4000);
+  // 'load' waits for scripts but not for tracking pixels/XHR — much faster than
+  // networkidle, and more reliable than domcontentloaded for JS-rendered content
+  await page.goto(job.url, { waitUntil: 'load', timeout: 60000 });
 
-  const fullJD = await page.evaluate(() => {
-    // Try specific Reed selectors first
+  // Handle HTTP 431
+  const is431 = await page.evaluate(() => (document.body?.innerText || '').includes('HTTP ERROR 431')).catch(() => false);
+  if (is431) {
+    console.log('  [Reed] HTTP 431 on job page — clearing cookies and reloading...');
+    await page.context().clearCookies();
+    await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  }
+
+  // Wait for the JD container to be in the DOM, then a short buffer for late JS
+  await page.waitForSelector(
+    '#jobDescriptionContainerDivId, [data-qa="job-description"], [itemprop="description"], .job-description',
+    { timeout: 15000 }
+  ).catch(() => {});
+  await DELAY(800);
+
+  // Single evaluate — one DOM round-trip extracts JD text + all signal flags
+  const result = await page.evaluate(() => {
+    // ── Job description ──────────────────────────────────────────────────
+    // Strategy 1: known class/ID selectors
     const descSelectors = [
       '#jobDescriptionContainerDivId',
       '[data-qa="job-description"]',
       '[itemprop="description"]',
-      '.description',
+      '.job-description',
       '[data-testid="job-description"]',
       '[data-testid="job-description-container"]',
-      '.job-description',
       '.job-description-copy',
-      '.col-description',
-      'article .content',
       '[class*="description"]',
-      '[class*="job-details"]',
     ];
+    let description = '';
     for (const sel of descSelectors) {
       const el = document.querySelector(sel);
-      if (el && el.innerText.trim().length > 80) return el.innerText.trim();
+      if (el && el.innerText.trim().length > 80) { description = el.innerText.trim(); break; }
     }
-    // Broad fallback: find the longest text block on the page
-    const candidates = Array.from(document.querySelectorAll('div, section, article'))
-      .filter(el => el.children.length < 20)
-      .map(el => el.innerText.trim())
-      .filter(t => t.length > 150);
-    if (candidates.length) {
-      candidates.sort((a, b) => b.length - a.length);
-      return candidates[0].substring(0, 8000);
+
+    // Strategy 2: find "Full job description" heading and grab its parent/sibling
+    // Reed currently renders JD under a "Full job description" <h2>
+    if (!description) {
+      const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, strong, b'));
+      for (const h of headings) {
+        if (/full job description|job description/i.test(h.innerText || '')) {
+          // Try parent container first (heading + content share a parent)
+          const parent = h.parentElement;
+          const parentText = (parent?.innerText || '').trim();
+          if (parentText.length > 200) { description = parentText.substring(0, 10000); break; }
+          // Try next siblings
+          let sib = h.nextElementSibling;
+          const parts = [];
+          while (sib && parts.join(' ').length < 10000) {
+            const t = sib.innerText.trim();
+            if (t) parts.push(t);
+            sib = sib.nextElementSibling;
+          }
+          if (parts.join(' ').length > 100) { description = parts.join('\n').substring(0, 10000); break; }
+        }
+      }
     }
-    const main = document.querySelector('main, [role="main"]');
-    return main ? main.innerText.trim().substring(0, 8000) : '';
-  });
 
-  // Detect training course listings (Reed shows "Training Course" in the salary field)
-  const isTrainingCourse = await page.evaluate(() => {
-    const text = (document.body.innerText || '').toLowerCase();
-    return text.includes('training course') ||
-           text.includes('training programme') ||
-           text.includes('no experience required') && text.includes('placement programme') ||
-           !!document.querySelector('[class*="salary"],[data-qa*="salary"],[class*="compensation"]') &&
-           (document.querySelector('[class*="salary"],[data-qa*="salary"],[class*="compensation"]')?.innerText || '').toLowerCase().includes('training');
-  });
+    // Strategy 3: longest text block on the page (no children count restriction)
+    if (!description) {
+      const blocks = Array.from(document.querySelectorAll('div, section, article'))
+        .map(el => el.innerText.trim())
+        .filter(t => t.length > 200);
+      blocks.sort((a, b) => b.length - a.length);
+      description = blocks[0]?.substring(0, 10000) ||
+        document.querySelector('main, [role="main"]')?.innerText.trim().substring(0, 10000) || '';
+    }
 
-  // Detect external-only listings (must apply on company website — not via Reed)
-  const isExternalOnly = await page.evaluate(() => {
-    const text = (document.body.innerText || '').toLowerCase();
-    if (text.includes('apply on company website') ||
-        text.includes('apply on employer') ||
-        text.includes('apply via employer') ||
-        text.includes('visit employer website') ||
-        text.includes('external application') ||
-        text.includes('apply externally') ||
-        text.includes('apply at employer') ||
-        text.includes("apply on the employer's website") ||
-        text.includes("apply on the company's website")) return true;
-    const allEls = Array.from(document.querySelectorAll('button, a'));
-    // Check button/link text
-    const hasExternalText = allEls.some(el => {
-      const t = (el.innerText || el.textContent || '').trim().toLowerCase();
-      return t.includes('apply on company') || t.includes('apply on employer') ||
-             t.includes('visit employer') || t.includes('apply via employer') ||
-             t.includes('apply externally') || t === 'apply at employer';
-    });
-    if (hasExternalText) return true;
-    // Check if the primary Apply button's href points outside reed.co.uk
-    const applyBtn = allEls.find(el => {
-      const t = (el.innerText || el.textContent || '').trim().toLowerCase();
-      return t === 'apply' || t === 'apply now' || t.includes('quick apply') || t.includes('apply online');
-    });
-    if (applyBtn && applyBtn.href &&
-        applyBtn.href.startsWith('http') &&
-        !applyBtn.href.includes('reed.co.uk')) return true;
-    return false;
-  });
+    // ── Training course: Reed marks these in the salary metadata element ─
+    const bodyLower = (document.body.innerText || '').toLowerCase();
+    const salaryEl = document.querySelector('[data-qa="salary"], [class*="salary"], [class*="compensation"]');
+    const salaryText = (salaryEl?.innerText || '').toLowerCase();
+    const isTrainingCourse = salaryText.includes('training') || bodyLower.includes('training course');
 
-  // Check whether a Reed-hosted Quick Apply form is available (only if not external-only)
-  const hasQuickApply = !isExternalOnly && await page.evaluate(() => {
-    const allEls = Array.from(document.querySelectorAll('button, a'));
-    return allEls.some(el => {
-      const t = (el.innerText || el.textContent || '').trim().toLowerCase();
-      return t === 'apply' ||
-             t === 'apply now' ||
-             t.includes('quick apply') ||
-             t.includes('apply online');
+    // ── External-only: job routes to a company site, not Reed's apply form ─
+    const externalPhrases = [
+      'apply on company website', 'apply on employer', 'apply via employer',
+      'visit employer website', 'apply externally', 'apply at employer',
+      "apply on the employer's website", "apply on the company's website",
+    ];
+    const isExternalOnly = externalPhrases.some(p => bodyLower.includes(p)) ||
+      Array.from(document.querySelectorAll('button, a')).some(el => {
+        const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        return t.startsWith('apply on company') || t.startsWith('apply on employer') ||
+               t.startsWith('visit employer') || t.startsWith('apply via employer');
+      });
+
+    // ── Apply button: check for any apply button on the page ─────────────
+    // Reed uses "Apply now" — use includes to handle whitespace/casing variations
+    const hasEasyApply = !isExternalOnly && Array.from(document.querySelectorAll('button, a')).some(el => {
+      const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      return t === 'apply' || t === 'apply now' || t.includes('quick apply') ||
+             t.includes('apply online') || t.startsWith('apply ');
     });
+
+    // Capture external apply URL from button/link href (without clicking)
+    let externalApplyUrl = '';
+    if (isExternalOnly) {
+      externalApplyUrl = Array.from(document.querySelectorAll('a[href], button[data-href]')).reduce((found, el) => {
+        if (found) return found;
+        const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (t.includes('apply on company') || t.includes('apply on employer') ||
+            t.includes('visit employer') || t.includes('apply via employer') ||
+            t.includes('apply externally')) {
+          return el.href || el.dataset?.href || '';
+        }
+        return '';
+      }, '');
+    }
+
+    return { description, isTrainingCourse, isExternalOnly, hasEasyApply, externalApplyUrl };
   });
 
   await page.screenshot({ path: `${SSDIR}/reed_job_page_check.png` });
-  console.log(`  [Reed JD] ${fullJD.length} chars | Quick Apply: ${hasQuickApply} | External only: ${isExternalOnly} | Training course: ${isTrainingCourse}`);
+  console.log(`  [Reed JD] ${result.description.length} chars | Apply: ${result.hasEasyApply} | External: ${result.isExternalOnly} | Training: ${result.isTrainingCourse}`);
 
-  return { ...job, description: fullJD, hasEasyApply: hasQuickApply, isTrainingCourse };
+  return { ...job, ...result };
 }
 
 // ── APPLY TO JOB ───────────────────────────────────────────────────────────
@@ -284,6 +372,15 @@ async function applyToJob(page, job, resumePath) {
 
   await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await DELAY(4000);
+
+  // Handle HTTP 431 (cookie headers too large) — clear and reload once
+  const is431 = await page.evaluate(() => (document.body?.innerText || '').includes('HTTP ERROR 431')).catch(() => false);
+  if (is431) {
+    console.log('  [Reed] HTTP 431 on apply page — clearing cookies and reloading...');
+    await page.context().clearCookies();
+    await page.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await DELAY(4000);
+  }
 
   // Check if already applied
   const alreadyApplied = await page.evaluate(() => {
@@ -344,23 +441,32 @@ async function applyToJob(page, job, resumePath) {
   await DELAY(5000);
   await page.screenshot({ path: `${SSDIR}/reed_apply_after_click.png` });
 
-  // If the same tab redirected outside reed.co.uk — external application
+  // If the same tab redirected outside reed.co.uk — check for supported ATS
   const currentUrl = page.url();
   if (!currentUrl.includes('reed.co.uk')) {
-    console.log('  [Reed] External application redirect — skipping:', currentUrl.substring(0, 80));
+    const ats = atsFiller.detectATS(currentUrl);
+    if (atsFiller.SUPPORTED_ATS.has(ats)) {
+      console.log(`  [Reed] ATS detected (redirect): ${ats} — filling form`);
+      return await atsFiller.fillExternalForm(page, job, resumePath, ats);
+    }
+    console.log('  [Reed] Unsupported external redirect — skipping:', currentUrl.substring(0, 80));
     return 'external';
   }
 
   // Check for a new tab/popup that opened to an external site
   const popupPage = await newPagePromise;
   if (popupPage && popupPage !== page) {
-    // Wait for it to navigate away from about:blank if still loading
     if (!popupPage.url() || popupPage.url() === 'about:blank') {
       await popupPage.waitForURL(u => u !== 'about:blank', { timeout: 3000 }).catch(() => {});
     }
     const popupUrl = popupPage.url();
     if (!popupUrl.includes('reed.co.uk')) {
-      console.log('  [Reed] External application opened in new tab — skipping:', popupUrl.substring(0, 80));
+      const ats = atsFiller.detectATS(popupUrl);
+      if (atsFiller.SUPPORTED_ATS.has(ats)) {
+        console.log(`  [Reed] ATS detected (new tab): ${ats} — filling form`);
+        return await atsFiller.fillExternalForm(popupPage, job, resumePath, ats);
+      }
+      console.log('  [Reed] Unsupported external new tab — skipping:', popupUrl.substring(0, 80));
       await popupPage.close().catch(() => {});
       return 'external';
     }
@@ -369,7 +475,12 @@ async function applyToJob(page, job, resumePath) {
   // Sweep all open tabs — close any non-reed external tabs
   for (const p of page.context().pages()) {
     if (p !== page && !p.url().includes('reed.co.uk') && p.url() !== 'about:blank') {
-      console.log('  [Reed] Closing external tab:', p.url().substring(0, 80));
+      const ats = atsFiller.detectATS(p.url());
+      if (atsFiller.SUPPORTED_ATS.has(ats)) {
+        console.log(`  [Reed] ATS detected (open tab): ${ats} — filling form`);
+        return await atsFiller.fillExternalForm(p, job, resumePath, ats);
+      }
+      console.log('  [Reed] Closing unsupported external tab:', p.url().substring(0, 80));
       await p.close().catch(() => {});
       return 'external';
     }
@@ -414,6 +525,25 @@ async function applyToJob(page, job, resumePath) {
 
   await page.screenshot({ path: `${SSDIR}/reed_after_cv_upload.png` });
 
+  // Click "Continue" if Reed's modal shows it after CV upload
+  try {
+    const continueBtn = await page.$('button:has-text("Continue")');
+    if (continueBtn && await continueBtn.isVisible()) {
+      console.log('  [Reed] Clicking Continue...');
+      await continueBtn.click();
+      await DELAY(3000);
+    }
+  } catch (_) {}
+
+  // After Continue, check if Reed reveals this is an external-only application
+  try {
+    const externalBtn = await page.$('button:has-text("Apply on external site"), a:has-text("Apply on external site"), button:has-text("apply on company website")');
+    if (externalBtn && await externalBtn.isVisible()) {
+      console.log('  [Reed] External site revealed after CV step — skipping');
+      return 'external';
+    }
+  } catch (_) {}
+
   await answerScreeningQuestions(page);
   await fillCoverLetter(page, job);
 
@@ -443,13 +573,19 @@ async function fillContactFields(page) {
       const el = await page.$(sel);
       if (el && await el.isVisible()) {
         const cur = await el.inputValue();
-        if (!cur) await el.fill(val);
+        if (!cur) {
+          await el.click({ clickCount: 3 });
+          await DELAY(80);
+          await el.fill(val);
+          await DELAY(100);
+        }
       }
     } catch (_) {}
   }
 }
 
 async function uploadResume(page, resumePath) {
+  if (!resumePath || !fs.existsSync(resumePath)) return;
   try {
     // Reed shows the CV saved on the account by default and hides the file input.
     // Click "Use a different CV" / "Change" / "Upload a different CV" first to reveal the upload field.
@@ -546,7 +682,11 @@ async function fillCoverLetter(page, job) {
         text = 'Please see my CV for details on my relevant experience and qualifications.';
       }
 
-      if (text) await ta.fill(text).catch(() => {});
+      if (text) {
+        await ta.click().catch(() => {});
+        await DELAY(80);
+        await ta.fill(text).catch(() => {});
+      }
     }
   } catch (_) {}
 }
@@ -607,6 +747,17 @@ async function answerScreeningQuestions(page) {
         if (v === 'yes') target = options.find(o => o.label.startsWith('yes') || /protected/i.test(o.label));
         else if (v === 'no') target = options.find(o => o.label.startsWith('no') || /not a/i.test(o.label));
         else target = options.find(o => /prefer not|decline|not.*say/i.test(o.label)) || options[options.length - 1];
+      } else if (/notice period|how.*soon.*start|when.*available.*start|notice.*required/i.test(question)) {
+        const avMap = {
+          'immediately': /immediate|asap|now|^0\s*|no notice|straight away/,
+          '1week':       /^1\s*week|one\s*week/,
+          '2weeks':      /^2\s*week|two\s*week/,
+          '1month':      /^1\s*month|one\s*month/,
+          '2months':     /^2\s*month|two\s*month/,
+          '3months':     /^3\s*month|three\s*month/,
+        };
+        const avKey = cfg.APPLICANT.availability || 'immediately';
+        target = options.find(o => avMap[avKey]?.test(o.label)) || options[0];
       } else if (/experience|have you|familiar|worked with|authoris|authoriz|eligible/i.test(question)) {
         target = options.find(o => o.label.startsWith('yes'));
       } else if (/british|uk citizen|nationality/i.test(question)) {
@@ -727,6 +878,8 @@ async function trySubmit(page) {
     try {
       const btn = await page.$(sel);
       if (btn && await btn.isVisible()) {
+        const btnText = (await btn.innerText().catch(() => '')).toLowerCase();
+        if (btnText.includes('external site') || btnText.includes('company website')) continue;
         await btn.scrollIntoViewIfNeeded();
         await DELAY(500);
         if (await btn.isEnabled()) {
@@ -755,4 +908,4 @@ async function trySubmit(page) {
   return submitted;
 }
 
-module.exports = { login, searchJobs, getJobDescription, applyToJob };
+module.exports = { ensureLoggedIn, searchJobs, getJobDescription, applyToJob };

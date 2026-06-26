@@ -10,12 +10,14 @@
  *            job to "cv_ready", pick up the CV path and submit via Easy Apply.
  */
 
-const { chromium } = require('playwright');
 const cfg      = require('./config');
 const linkedin = require('./modules/linkedin');
 const queue    = require('./modules/queue_manager');
 const logger   = require('./modules/logger');
 const salary   = require('./modules/salary_filter');
+const stealth  = require('./modules/stealth');
+const { launchPersistentContext, connectToRunningChrome } = require('./modules/browser_launcher');
+const path     = require('path');
 
 const DELAY         = ms => new Promise(r => setTimeout(r, ms));
 const POLL_INTERVAL = 10000;
@@ -46,12 +48,58 @@ function workTypePriority() {
   return map;
 }
 
+// Drain — apply all currently cv_ready LinkedIn jobs, then return immediately.
+async function drainReadyCVs(liPage) {
+  const priority = workTypePriority();
+  const readyJobs = queue.getByStatus('cv_ready')
+    .filter(j => j.source === 'linkedin')
+    .sort((a, b) => (priority[a.workType] ?? 99) - (priority[b.workType] ?? 99));
+
+  if (!readyJobs.length) return;
+  console.log(`\n  [LinkedIn Bot] [Drain] ${readyJobs.length} cv_ready job(s) — applying before next search...`);
+
+  for (const job of readyJobs) {
+    if (queue.countAppliedToday() >= cfg.MAX_APPLICATIONS_PER_DAY) {
+      console.log(`  [LinkedIn Bot] Daily limit reached — stopping drain`);
+      return;
+    }
+    if (!isRelevantTitle(job.title)) {
+      queue.update(job.jobId, { status: 'skipped', reason: 'Title filter (post-queue)' });
+      continue;
+    }
+    queue.update(job.jobId, { status: 'applying' });
+    console.log(`  [LinkedIn Bot] [Drain] Applying: ${job.title} @ ${job.company}`);
+    try {
+      const applied = await linkedin.applyToJob(liPage, job, job.cvPath);
+      if (applied === null) {
+        queue.update(job.jobId, { status: 'skipped' });
+        queue.markApplied(job.jobId);
+        logger.log(job.title, job.company, job.url, job.cvName, job.cvScore, 'SKIPPED', 'Already applied');
+      } else {
+        const finalStatus = applied ? 'applied' : 'apply_failed';
+        queue.update(job.jobId, { status: finalStatus });
+        if (applied) queue.markApplied(job.jobId);
+        logger.log(job.title, job.company, job.url, job.cvName, job.cvScore, applied ? 'APPLIED' : 'APPLY_FAILED', applied ? 'LinkedIn Easy Apply' : 'LinkedIn form could not be completed');
+        console.log(`  [LinkedIn Bot] ${applied ? '✓ Applied' : '✗ Apply failed'}: ${job.title}`);
+      }
+    } catch (err) {
+      queue.update(job.jobId, { status: 'apply_failed', error: err.message });
+      logger.log(job.title, job.company, job.url, 'N/A', 0, 'ERROR', err.message.substring(0, 100));
+      console.error(`  [LinkedIn Bot] [Drain] Error: ${err.message}`);
+    }
+    await DELAY(8000 + Math.random() * 7000);
+  }
+}
+
 async function phase1_searchAndQueue(liPage) {
   console.log('\n══════════════════════════════════════════════════════');
   console.log('  [LinkedIn Bot] Phase 1 — Searching for jobs');
   console.log('══════════════════════════════════════════════════════');
 
   for (const searchTerm of cfg.JOB_SEARCHES) {
+    // Drain any cv_ready jobs before starting the next search term
+    await drainReadyCVs(liPage);
+
     console.log(`\n  [LinkedIn Bot] Searching: "${searchTerm}"`);
     let jobs;
     try {
@@ -80,10 +128,6 @@ async function phase1_searchAndQueue(liPage) {
         continue;
       }
 
-      if (queue.wasAppliedToCompanyRecently(job.company)) {
-        console.log(`  [LinkedIn Bot] Applied to ${job.company} in last 30 days — skipping: ${job.title}`);
-        continue;
-      }
 
       if (queue.hasCanonical(job.title, job.company)) {
         console.log(`  [LinkedIn Bot] Duplicate (cross-site) — skipping: ${job.title} @ ${job.company}`);
@@ -96,6 +140,12 @@ async function phase1_searchAndQueue(liPage) {
         if (!jobDetails.description || jobDetails.description.trim().split(/\s+/).length < 80) {
           console.log(`  [LinkedIn Bot] Short/missing JD — skipping: ${job.title}`);
           queue.add({ ...job, source: 'linkedin', status: 'skipped', reason: 'JD too short or missing' });
+          continue;
+        }
+
+        if (cfg.isTrainingCourseJD(jobDetails.description, job.title)) {
+          console.log(`  [LinkedIn Bot] Training course — skipping: ${job.title}`);
+          queue.add({ ...job, source: 'linkedin', status: 'skipped', reason: 'Training course' });
           continue;
         }
 
@@ -211,7 +261,7 @@ async function phase2_applyReadyCVs(liPage) {
       idleCount = 0;
     } else if (pendingJobs > 0) {
       idleCount = 0;
-      queue.printStatus();
+      try { queue.printStatus(); } catch (_) {}
       console.log(`  [LinkedIn Bot] Waiting for Scorer bot... (${pendingJobs} LinkedIn job(s) in progress)`);
     } else {
       idleCount++;
@@ -227,14 +277,6 @@ async function main() {
   await cfg.init();
   await queue.init(process.env.JOBBOT_USERDATA);
 
-  const liEmail = process.env.LI_EMAIL;
-  const liPass  = process.env.LI_PASS;
-
-  if (!liEmail || !liPass) {
-    console.error('ERROR: Set LI_EMAIL and LI_PASS env vars');
-    process.exit(1);
-  }
-
   console.log('═══════════════════════════════════════════════════════');
   console.log('  LinkedIn Bot — Starting (continuous mode)');
   console.log('═══════════════════════════════════════════════════════');
@@ -246,17 +288,24 @@ async function main() {
     for (const j of stuckApplying) queue.update(j.jobId, { status: 'cv_ready' });
   }
 
-  const browser = await chromium.launch({ headless: false, slowMo: 60 });
-  let liPage;
+  const profileDir = path.join(process.env.JOBBOT_USERDATA, 'linkedin_profile');
+  const cdpPort = process.env.JOBBOT_CDP_PORT;
+  const context = cdpPort
+    ? await connectToRunningChrome(parseInt(cdpPort)).catch(() => launchPersistentContext(profileDir))
+    : await launchPersistentContext(profileDir);
+  await stealth.applyToContext(context);
+
+  const liPage = await context.newPage();
   try {
-    liPage = await linkedin.login(browser, liEmail, liPass);
+    await linkedin.ensureLoggedIn(liPage);
   } catch (err) {
     console.error('ERROR: ' + err.message);
-    await browser.close().catch(() => {});
+    await context.close().catch(() => {});
     process.exit(1);
   }
 
   while (true) {
+    await phase2_applyReadyCVs(liPage);
     await phase1_searchAndQueue(liPage);
     await phase2_applyReadyCVs(liPage);
     logger.printSummary();

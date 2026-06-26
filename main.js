@@ -148,7 +148,11 @@ ipcMain.handle('cvs:get', () => db.getCVs());
 ipcMain.handle('cvs:pickAndAdd', async (event, label) => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile'],
-    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    filters: [
+      { name: 'CV Files', extensions: ['pdf', 'docx', 'doc'] },
+      { name: 'Word Document', extensions: ['docx', 'doc'] },
+      { name: 'PDF', extensions: ['pdf'] },
+    ],
   });
   if (result.canceled || !result.filePaths.length) return null;
 
@@ -161,6 +165,10 @@ ipcMain.handle('cvs:addSuggestedTerms', (event, cvId) => {
   const cv = db.getCVs().find(c => c.id === cvId);
   if (!cv || !cv.suggested_roles.length) return db.getSearchTerms(false);
   return db.addSearchTerms(cv.suggested_roles, 'ai_generated');
+});
+
+ipcMain.handle('cvs:remove', (event, cvId) => {
+  db.removeCV(cvId);
 });
 
 // ── Credentials (encrypted via OS-level safeStorage) ───────────────────────
@@ -214,7 +222,22 @@ ipcMain.handle('queue:recent', (event, limit) => queueReader.getRecentApplicatio
 ipcMain.handle('queue:dailyApplications', (event, days) => queueReader.getDailyApplications(days || 14));
 
 // ── Bot manager ──────────────────────────────────────────────────────────
-ipcMain.handle('bot:start', (event, botName) => botManager.start(botName, app.getPath('userData')));
+ipcMain.handle('bot:start', async (event, botName) => {
+  const userData = app.getPath('userData');
+  const cdpPort = connectPorts.get(botName); // set if Chrome is still open
+  if (cdpPort) {
+    // Chrome is still running from "Connect account" — attach the bot to it
+    // directly via CDP. No kill, no relaunch, same session.
+    return botManager.start(botName, userData, { cdpPort });
+  }
+
+  // Chrome was already closed — open fresh with the saved profile
+  const profileDir = path.join(userData, `${botName}_profile`);
+  for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+    try { fs.unlinkSync(path.join(profileDir, f)); } catch (_) {}
+  }
+  return botManager.start(botName, userData, {});
+});
 ipcMain.handle('bot:stop', (event, botName) => botManager.stop(botName));
 ipcMain.handle('bot:status', () => botManager.getStatus());
 
@@ -288,35 +311,157 @@ ipcMain.handle('license:verify', async (event, key) => {
 // ── Shell ────────────────────────────────────────────────────────────────
 ipcMain.handle('shell:openPath', (event, filePath) => shell.openPath(filePath));
 
-// ── Site Connect — opens Chrome (no Playwright/CDP) so user can log in ──
-// The bot later uses launchPersistentContext on the same profileDir and
-// finds an already-authenticated session — bot detection never fires.
+// ── Site Connect ──────────────────────────────────────────────────────────
+// Opens real Chrome with --remote-debugging-port so Playwright can attach to
+// the SAME Chrome window the user logged in with (connectOverCDP).
+// This reuses the live session — no cookie export, no new Chrome launch.
+const connectProcs = new Map();   // site → ChildProcess
+const connectPorts = new Map();   // site → CDP port (while Chrome is open)
+
+// The connect window must use the SAME proxy as the bot so the cf_clearance
+// cookie is issued for the proxy IP, not the home IP.
+// __PROXY_URL__ is replaced at build time by GitHub Actions (same as browser_launcher.js).
+const _CONNECT_BUILTIN_PROXY = '__PROXY_URL__';
+const CONNECT_PROXY_URL = process.env.JOBBOT_PROXY_URL ||
+  (_CONNECT_BUILTIN_PROXY.startsWith('__') ? '' : _CONNECT_BUILTIN_PROXY);
+
+const SITE_DEBUG_PORTS = {
+  reed: 9222, linkedin: 9223, indeed: 9224,
+  glassdoor: 9225, cvlibrary: 9226, totaljobs: 9227, cwjobs: 9228,
+};
+
+// ── Chrome Session Import ─────────────────────────────────────────────────
+// Copies the user's real Chrome profile (cookies, localStorage, cf_clearance)
+// into the bot's profile dir so the bot inherits the user's trusted session.
+// This avoids Cloudflare Turnstile because the cf_clearance cookie is already
+// present from the user's real browser history.
+function copyDirSync(src, dst) {
+  fs.mkdirSync(dst, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, entry.name);
+    const d = path.join(dst, entry.name);
+    if (entry.isDirectory()) { copyDirSync(s, d); }
+    else { try { fs.copyFileSync(s, d); } catch (_) {} }
+  }
+}
+
+ipcMain.handle('session:importChrome', async (event, botName) => {
+  const chromeData = path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'User Data');
+  if (!fs.existsSync(chromeData)) {
+    return { ok: false, error: 'Google Chrome not found on this machine.' };
+  }
+
+  const botProfile = path.join(app.getPath('userData'), `${botName}_profile`);
+  fs.mkdirSync(path.join(botProfile, 'Default'), { recursive: true });
+
+  const errors = [];
+
+  // Local State holds the AES key used to decrypt cookie values (DPAPI-wrapped).
+  // Must be copied alongside Cookies or the bot cannot read the cookie values.
+  try { fs.copyFileSync(path.join(chromeData, 'Local State'), path.join(botProfile, 'Local State')); }
+  catch (e) { errors.push(`Local State: ${e.message}`); }
+
+  // Cookies DB — contains cf_clearance, session tokens, auth cookies for all sites
+  try { fs.copyFileSync(path.join(chromeData, 'Default', 'Cookies'), path.join(botProfile, 'Default', 'Cookies')); }
+  catch (e) { errors.push(`Cookies: ${e.message}`); }
+
+  // localStorage — site auth state (e.g. Indeed session storage)
+  const lsSrc = path.join(chromeData, 'Default', 'Local Storage');
+  if (fs.existsSync(lsSrc)) {
+    try { copyDirSync(lsSrc, path.join(botProfile, 'Default', 'Local Storage')); }
+    catch (e) { errors.push(`Local Storage: ${e.message}`); }
+  }
+
+  // Network state — HSTS, certificate pinning, trust signals
+  const netSrc = path.join(chromeData, 'Default', 'Network');
+  if (fs.existsSync(netSrc)) {
+    try { copyDirSync(netSrc, path.join(botProfile, 'Default', 'Network')); }
+    catch (e) { errors.push(`Network: ${e.message}`); }
+  }
+
+  // Remove singleton locks so Playwright can open the profile
+  for (const lock of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+    try { fs.rmSync(path.join(botProfile, lock)); } catch (_) {}
+  }
+
+  const cookiesLocked = errors.some(e => e.includes('Cookies'));
+  if (cookiesLocked) {
+    return { ok: false, chromeOpen: true, error: 'Please close Google Chrome first, then try again.' };
+  }
+
+  return { ok: true, warnings: errors.length ? errors : undefined };
+});
+
 ipcMain.handle('site:connect', async (event, { site, loginUrl }) => {
-  const fs   = require('fs');
-  const { execFile } = require('child_process');
   const profileDir = path.join(app.getPath('userData'), `${site}_profile`);
 
-  // Find Chrome or Edge (ordered by preference)
+  // Kill any existing connect window for this site
+  const existingPid = connectProcs.get(site);
+  if (existingPid) {
+    try { process.kill(existingPid); } catch (_) {}
+    connectProcs.delete(site);
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  // Remove stale Chrome lock files so a fresh instance opens cleanly
+  for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+    try { fs.unlinkSync(path.join(profileDir, f)); } catch (_) {}
+  }
+
+  // Find real Chrome or Edge — must match what the bot will use
   const candidates = [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
     path.join(process.env.LOCALAPPDATA || '', 'Google\\Chrome\\Application\\chrome.exe'),
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
     'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
     path.join(process.env.LOCALAPPDATA || '', 'Microsoft\\Edge\\Application\\msedge.exe'),
   ];
-  const browserPath = candidates.find(p => { try { return fs.existsSync(p); } catch(_) { return false; } });
+  const browserPath = candidates.find(p => { try { return fs.existsSync(p); } catch (_) { return false; } });
   if (!browserPath) return { success: false, error: 'Chrome or Edge not found on this computer.' };
 
   return new Promise((resolve) => {
+    const { execFile } = require('child_process');
+    const port = SITE_DEBUG_PORTS[site] || 9229;
+
+    // Glassdoor Easy Apply routes through Indeed's OAuth, so the glassdoor_profile
+    // must have an active Indeed session. Open Indeed login first so the user logs
+    // into both sites in the same Chrome window.
+    const extraUrls = site === 'glassdoor' ? ['https://uk.indeed.com/account/login'] : [];
+
+    // Pass the proxy to Chrome so cf_clearance is issued for the proxy IP,
+    // not the home IP. Without this Cloudflare re-challenges every bot run.
+    const proxyArgs = [];
+    if (CONNECT_PROXY_URL) {
+      try {
+        const pu = new URL(CONNECT_PROXY_URL);
+        proxyArgs.push(`--proxy-server=${pu.protocol}//${pu.hostname}:${pu.port}`);
+        if (pu.username) {
+          // Chrome requires proxy auth via --proxy-bypass-list or user:pass@ prefix
+          // For authenticated proxies use the host:port form and let Chrome prompt,
+          // or embed credentials in the server string (supported by most proxy types).
+          proxyArgs[0] = `--proxy-server=${pu.protocol}//${decodeURIComponent(pu.username)}:${decodeURIComponent(pu.password)}@${pu.hostname}:${pu.port}`;
+        }
+      } catch (_) {}
+    }
+
     const proc = execFile(browserPath, [
       `--user-data-dir=${profileDir}`,
+      `--remote-debugging-port=${port}`,
       '--profile-directory=Default',
       '--no-first-run',
       '--no-default-browser-check',
+      '--disable-notifications',
+      '--disable-session-crashed-bubble',
+      '--disable-infobars',
+      ...proxyArgs,
+      ...extraUrls,
       loginUrl,
     ]);
-    proc.on('close', () => resolve({ success: true }));
-    proc.on('error', (err) => resolve({ success: false, error: err.message }));
+    connectProcs.set(site, proc.pid);
+    connectPorts.set(site, port);
+    proc.on('spawn', () => resolve({ success: true }));
+    proc.on('error', (err) => { connectProcs.delete(site); connectPorts.delete(site); resolve({ success: false, error: err.message }); });
+    proc.on('close', () => { connectProcs.delete(site); connectPorts.delete(site); });
   });
 });
