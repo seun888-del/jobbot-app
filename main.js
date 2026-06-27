@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, safeStorage, dialog, shell, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, dialog, shell, Notification, Menu } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
@@ -27,10 +27,15 @@ ipcMain.handle('update:install', () => {
 let mainWindow;
 
 function createWindow() {
+  const isMac = process.platform === 'darwin';
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 750,
     icon: path.join(__dirname, 'assets', 'icon.ico'),
+    backgroundColor: '#0b1f3a',
+    // Navy custom title bar; the menu lives inside it (rendered by the app).
+    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
+    ...(isMac ? {} : { titleBarOverlay: { color: '#0b1f3a', symbolColor: '#ffffff', height: 38 } }),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -39,6 +44,34 @@ function createWindow() {
   });
   mainWindow.loadFile(path.join(__dirname, 'src/renderer/index.html'));
 }
+
+// We render our own menu in the navy title bar, so remove the native one.
+Menu.setApplicationMenu(null);
+
+// Actions invoked by the custom in-title-bar menu (File/Edit/View/Window/Help).
+ipcMain.handle('win:action', (_e, action) => {
+  const w = mainWindow;
+  if (!w) return;
+  const wc = w.webContents;
+  switch (action) {
+    case 'minimize':       w.minimize(); break;
+    case 'close':          w.close(); break;
+    case 'quit':           app.quit(); break;
+    case 'reload':         wc.reload(); break;
+    case 'toggleDevTools': wc.toggleDevTools(); break;
+    case 'fullscreen':     w.setFullScreen(!w.isFullScreen()); break;
+    case 'zoomIn':         wc.setZoomLevel(wc.getZoomLevel() + 0.5); break;
+    case 'zoomOut':        wc.setZoomLevel(wc.getZoomLevel() - 0.5); break;
+    case 'zoomReset':      wc.setZoomLevel(0); break;
+    case 'undo':           wc.undo(); break;
+    case 'redo':           wc.redo(); break;
+    case 'cut':            wc.cut(); break;
+    case 'copy':           wc.copy(); break;
+    case 'paste':          wc.paste(); break;
+    case 'selectAll':      wc.selectAll(); break;
+    case 'about':          dialog.showMessageBox(w, { type: 'info', title: 'About Job-AI', message: 'Job-AI', detail: 'Version ' + app.getVersion() }); break;
+  }
+});
 
 // Single-instance lock — prevents a second copy of the app from starting
 // (e.g. double-clicking the icon while an installer/update is running). A second

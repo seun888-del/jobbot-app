@@ -365,7 +365,7 @@ async function renderCVs() {
   content.innerHTML = `
     <div class="page-header">
       <h2>Your CVs</h2>
-      <p>Upload your CV to get started. <strong>Word (.docx) is recommended</strong> — it produces cleaner, better-formatted tailored CVs. PDF is also accepted but may have formatting issues.</p>
+      <p>Upload your CV to get started. <strong>Word (.docx) is recommended</strong> — it's read more accurately, so your tailored CV captures every detail. PDF also works, but can occasionally be misread during tailoring.</p>
     </div>
 
     <div id="cv-list">
@@ -1677,7 +1677,7 @@ const TOUR_STEPS = [
   {
     view: 'cvs',
     title: 'Step 2 - Upload Your CV',
-    tip: 'Upload your CV as a PDF. The AI rewrites the profile section of your CV to match each specific job before applying - so every application is uniquely tailored.',
+    tip: 'Upload your CV as a PDF. Before each application, the AI rewrites your professional summary and your bullet points to match that specific job - naturally, so it reads well to a recruiter, not just keyword-stuffed.',
     action: 'Click “Add CV” and upload at least one PDF. You can add multiple CVs for different role types and the Agent picks the best one per job.',
   },
   {
@@ -1695,14 +1695,14 @@ const TOUR_STEPS = [
   {
     view: 'dashboard',
     title: 'Step 5 - Connect Your Job Site Accounts',
-    tip: 'Every Agent card has a “Connect account” button. Click it and a browser window opens - just log in as normal. Your session is saved so the Agent can apply on your behalf without ever seeing your password.',
-    action: 'Click “Connect account” on each Agent card, log in, then close the browser window. Once connected, click Start.',
+    tip: 'On the Dashboard, each job site (Reed, LinkedIn) has a “Connect account” button. Click it and a browser window opens - just log in as normal. Your session is saved so the Agent can apply on your behalf without ever seeing your password.',
+    action: 'Click “Connect account” on a job site card, log in, then close the browser window. You only need one connected to begin.',
   },
   {
     view: 'dashboard',
-    title: 'All Set - Start the Agents',
-    tip: 'The job site Agents (Reed, LinkedIn) find and apply to matching roles. The Scorer Agent runs in the middle - it uses AI to tailor your CV for every role before it is submitted. The Scorer starts automatically when you start a job site Agent.',
-    action: 'Click Start on the Reed Agent or LinkedIn Agent. The Scorer Agent starts automatically alongside it. Applications will begin within minutes.',
+    title: 'All Set - Start Applying',
+    tip: 'When you click Start applying, the job site Agents (Reed, LinkedIn) search and apply to matching roles - and the AI tailoring engine runs automatically in the background to customise your CV for every job before it is submitted. You do not start it yourself.',
+    action: 'Click the “Start applying” button on the Dashboard. The “How to start applying” checklist there walks you through anything missing. Applications begin within minutes.',
   },
 ];
 

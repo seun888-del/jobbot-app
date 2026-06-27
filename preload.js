@@ -1,6 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
+  platform: process.platform,
+  win: { action: (a) => ipcRenderer.invoke('win:action', a) },
   profile: {
     get: () => ipcRenderer.invoke('profile:get'),
     save: (fields) => ipcRenderer.invoke('profile:save', fields),

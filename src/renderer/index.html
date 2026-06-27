@@ -4,8 +4,58 @@
   <meta charset="UTF-8">
   <title>Job-AI</title>
   <link rel="stylesheet" href="styles.css">
+  <script>document.documentElement.dataset.os = (window.api && window.api.platform) || '';</script>
 </head>
 <body>
+  <div class="titlebar">
+    <span class="titlebar-brand">Job-AI</span>
+    <nav class="menubar" id="menubar">
+      <div class="menu">
+        <button class="menu-label">File</button>
+        <div class="menu-pop">
+          <button data-action="quit">Exit</button>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-label">Edit</button>
+        <div class="menu-pop">
+          <button data-action="undo">Undo</button>
+          <button data-action="redo">Redo</button>
+          <hr>
+          <button data-action="cut">Cut</button>
+          <button data-action="copy">Copy</button>
+          <button data-action="paste">Paste</button>
+          <button data-action="selectAll">Select All</button>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-label">View</button>
+        <div class="menu-pop">
+          <button data-action="reload">Reload</button>
+          <button data-action="fullscreen">Toggle Full Screen</button>
+          <hr>
+          <button data-action="zoomIn">Zoom In</button>
+          <button data-action="zoomOut">Zoom Out</button>
+          <button data-action="zoomReset">Actual Size</button>
+          <hr>
+          <button data-action="toggleDevTools">Toggle Developer Tools</button>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-label">Window</button>
+        <div class="menu-pop">
+          <button data-action="minimize">Minimize</button>
+          <button data-action="close">Close</button>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-label">Help</button>
+        <div class="menu-pop">
+          <button data-action="about">About Job-AI</button>
+        </div>
+      </div>
+    </nav>
+  </div>
   <div class="app">
     <nav class="sidebar">
       <h1>Job-AI</h1>
@@ -27,5 +77,34 @@
     </div>
   </div>
   <script src="app.js"></script>
+  <script>
+    // Wire the custom title-bar menu (click to open, hover to switch, click-away to close)
+    (function () {
+      var menubar = document.getElementById('menubar');
+      if (!menubar) return;
+      var open = null;
+      function closeAll() { if (open) { open.classList.remove('open'); open = null; } }
+      menubar.querySelectorAll('.menu').forEach(function (menu) {
+        var label = menu.querySelector('.menu-label');
+        label.addEventListener('click', function (e) {
+          e.stopPropagation();
+          var wasOpen = menu === open;
+          closeAll();
+          if (!wasOpen) { menu.classList.add('open'); open = menu; }
+        });
+        label.addEventListener('mouseenter', function () {
+          if (open && open !== menu) { closeAll(); menu.classList.add('open'); open = menu; }
+        });
+      });
+      menubar.querySelectorAll('.menu-pop button[data-action]').forEach(function (btn) {
+        btn.addEventListener('click', function (e) {
+          e.stopPropagation();
+          if (window.api && window.api.win) window.api.win.action(btn.dataset.action);
+          closeAll();
+        });
+      });
+      document.addEventListener('click', closeAll);
+    })();
+  </script>
 </body>
 </html>

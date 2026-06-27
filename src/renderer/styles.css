@@ -31,9 +31,53 @@ body {
   overflow: hidden;
   color: var(--text);
   -webkit-font-smoothing: antialiased;
+  display: flex;
+  flex-direction: column;
 }
 
-.app { display: flex; height: 100vh; }
+/* ── Navy title bar with custom menu (window controls drawn by the OS) ── */
+.titlebar {
+  height: 38px;
+  flex-shrink: 0;
+  background: #0b1f3a;
+  display: flex;
+  align-items: stretch;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #cdd7e8;
+}
+/* Clear macOS traffic-light buttons (top-left) */
+html[data-os="darwin"] .titlebar-brand { padding-left: 78px; }
+
+.menubar { display: flex; align-items: stretch; -webkit-app-region: no-drag; }
+.menu { position: relative; display: flex; }
+.menu-label {
+  background: none; border: 0; color: #cbd5e1; font: inherit; font-size: 13px;
+  padding: 0 11px; cursor: pointer;
+}
+.menu-label:hover, .menu.open .menu-label { background: rgba(255, 255, 255, 0.10); color: #fff; }
+.menu-pop {
+  display: none; position: absolute; top: 100%; left: 0; min-width: 190px;
+  background: #16294a; border: 1px solid #25406e; border-radius: 0 0 8px 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35); padding: 6px; z-index: 1000;
+}
+.menu.open .menu-pop { display: block; }
+.menu-pop button {
+  display: block; width: 100%; text-align: left; background: none; border: 0;
+  color: #e2e8f0; font: inherit; font-size: 13px; padding: 7px 12px; border-radius: 6px; cursor: pointer;
+}
+.menu-pop button:hover { background: var(--primary, #2563eb); color: #fff; }
+.menu-pop hr { border: 0; border-top: 1px solid #25406e; margin: 5px 4px; }
+
+.app { display: flex; flex: 1; min-height: 0; }
 
 /* ── Sidebar ──────────────────────────────────────────────────────────── */
 .sidebar {
