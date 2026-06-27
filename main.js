@@ -40,6 +40,21 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'src/renderer/index.html'));
 }
 
+// Single-instance lock — prevents a second copy of the app from starting
+// (e.g. double-clicking the icon while an installer/update is running). A second
+// instance would lock the app's files and can corrupt an in-progress install.
+const gotInstanceLock = app.requestSingleInstanceLock();
+if (!gotInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
 app.whenReady().then(async () => {
   await db.init(app.getPath('userData'));
   queueReader.init(app.getPath('userData'));
