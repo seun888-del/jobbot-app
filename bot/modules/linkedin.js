@@ -498,18 +498,33 @@ async function answerScreeningQuestions(page, job) {
 
 // ── SHARED: resolve which option text to pick for a labelled dropdown ─────
 // options is [{text: string}] where text is already lowercased
+// Correct yes/no for the legally-sensitive questions, shared by every LinkedIn
+// field type (radio, dropdown, text). Sponsorship is resolved SEPARATELY from
+// right-to-work and ALWAYS from the user's profile — so an unusual phrasing can
+// never fall through to a "default Yes". Returns 'yes' | 'no' | null.
+function sensitiveYesNo(question, job) {
+  const q = (question || '').toLowerCase();
+  // Any mention of sponsorship → answer from profile (handle inverted phrasing)
+  if (/sponsor/i.test(q)) {
+    const needs = !!cfg.APPLICANT.requiresSponsorship;
+    if (/without sponsor|not require sponsor|no sponsor|don.?t (need|require) sponsor/i.test(q)) return needs ? 'no' : 'yes';
+    return needs ? 'yes' : 'no';
+  }
+  if (/right to work|work permit|authoris|authoriz|eligible.*work|legal.*work|work.*authoris|entitled to work|permit to work/i.test(q)) {
+    return hasRightToWork(job?.description) ? 'yes' : 'no';
+  }
+  if (/reloc/i.test(q)) return cfg.APPLICANT.willingToRelocate ? 'yes' : 'no';
+  if (/driving.*licen|licen.*driving|valid.*licen|full (uk )?licen/i.test(q)) return cfg.APPLICANT.drivingLicence ? 'yes' : 'no';
+  return null;
+}
+
 function resolveDropdownChoice(question, options, job) {
   const q = question.toLowerCase();
   const yr = cfg.APPLICANT.yearsExperience ?? 0;
 
-  if (/require.*sponsor|need.*sponsor|visa.*sponsor|sponsor.*visa|will.*need.*sponsor|employer.*sponsor/i.test(q)) {
-    const needs = cfg.APPLICANT.requiresSponsorship;
-    return options.find(o => needs ? /^yes/.test(o.text) : /^no/.test(o.text)) || null;
-  }
-  if (/right to work|work permit|authoris|authoriz|eligible.*work|legal.*work|work.*authoris/i.test(q)) {
-    const rtw = hasRightToWork(job?.description);
-    return options.find(o => rtw ? /^yes/.test(o.text) : /^no/.test(o.text)) || null;
-  }
+  // Sensitive yes/no questions first — never let these reach the default-Yes path
+  const yn = sensitiveYesNo(question, job);
+  if (yn) return options.find(o => yn === 'yes' ? /^yes/.test(o.text) : /^no/.test(o.text)) || null;
   if (/commut|travel to|able to.*office|willing to.*office|office.*location/i.test(q)) {
     return options.find(o => /^yes/.test(o.text)) || options[0] || null;
   }
@@ -722,14 +737,10 @@ async function _answerRadios(page, job) {
         options.push({ radio, label: labelText });
       }
       let target = null;
-      if (/sponsor/i.test(question)) {
-        // Any question mentioning sponsorship → use requiresSponsorship from profile
-        const needs = cfg.APPLICANT.requiresSponsorship;
-        target = needs ? options.find(o => /^yes/.test(o.label)) : options.find(o => /^no/.test(o.label));
-        console.log(`  [LinkedIn] Sponsorship question → ${needs ? 'Yes' : 'No'}`);
-      } else if (/right to work|work permit|authoris|authoriz|eligible.*work|legal.*work|work.*authoris/i.test(question)) {
-        const rtw = hasRightToWork(job?.description);
-        target = rtw ? options.find(o => /^yes/.test(o.label)) : options.find(o => /^no/.test(o.label));
+      const _yn = sensitiveYesNo(question, job);
+      if (_yn) {
+        target = options.find(o => _yn === 'yes' ? /^yes/.test(o.label) : /^no/.test(o.label));
+        if (/sponsor/i.test(question)) console.log(`  [LinkedIn] Sponsorship question → ${_yn === 'yes' ? 'Yes' : 'No'}`);
       } else if (/commut|travel to|able to.*office|willing to.*office|office.*location|onsite setting|comfortable.*onsite|comfortable.*office/i.test(question)) {
         const wantsOnsite = cfg.WORK_TYPE_PRIORITY.includes('onsite');
         target = wantsOnsite
@@ -887,10 +898,9 @@ async function _answerTextInputs(page, job) {
         }
         return '';
       });
-      if (/require.*sponsor|need.*sponsor|visa.*sponsor|sponsor.*visa|employer.*sponsor/i.test(question)) {
-        await _fillInput(inp, cfg.APPLICANT.requiresSponsorship ? 'Yes' : 'No');
-      } else if (/right to work|work permit|authoris|authoriz|eligible.*work|legal.*work/i.test(question)) {
-        await _fillInput(inp, hasRightToWork(job?.description) ? 'Yes' : 'No');
+      const _yn = sensitiveYesNo(question, job);
+      if (_yn) {
+        await _fillInput(inp, _yn === 'yes' ? 'Yes' : 'No');
       } else if (/commut|travel to|able to.*office|willing to.*office/i.test(question)) {
         await _fillInput(inp, 'Yes');
       } else if (/year.*experience|experience.*year|how many year|how long/i.test(question)) {

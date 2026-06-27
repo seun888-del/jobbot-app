@@ -473,3 +473,24 @@ ipcMain.handle('site:connect', async (event, { site, loginUrl }) => {
     proc.on('close', () => { connectProcs.delete(site); connectPorts.delete(site); });
   });
 });
+
+// Reports which sites the user has connected an account for. A session-based
+// site (LinkedIn etc.) stores nothing in `credentials` — its login lives in a
+// `{site}_profile` Chrome folder — so we detect connection by that folder's
+// populated "Default" profile, OR (for password sites like Reed) a saved login.
+ipcMain.handle('site:connectedStatus', () => {
+  const sites = ['reed', 'linkedin', 'glassdoor', 'cvlibrary', 'totaljobs', 'cwjobs', 'indeed'];
+  const status = {};
+  for (const site of sites) {
+    let connected = false;
+    try {
+      const profileDir = path.join(app.getPath('userData'), `${site}_profile`);
+      if (fs.existsSync(path.join(profileDir, 'Default'))) connected = true;
+    } catch (_) {}
+    if (!connected) {
+      try { if (db.getCredential(site)?.username) connected = true; } catch (_) {}
+    }
+    status[site] = connected;
+  }
+  return status;
+});

@@ -691,6 +691,27 @@ async function fillCoverLetter(page, job) {
   } catch (_) {}
 }
 
+// Correct yes/no for the legally-sensitive questions, shared by Reed's radio,
+// dropdown and text handlers. Sponsorship is answered from the user's profile and
+// is kept SEPARATE from right-to-work (a user who needs no sponsorship has the
+// right to work). Handles inverted "without sponsorship" phrasing. Returns
+// 'yes' | 'no' | null.
+function sensitiveYesNo(question) {
+  const q = (question || '').toLowerCase();
+  const needsSponsor = !!cfg.APPLICANT.requiresSponsorship;
+  // Any mention of sponsorship → from profile (check inverted phrasing first)
+  if (/sponsor/i.test(q)) {
+    if (/without sponsor|not require sponsor|no sponsor|don.?t (need|require) sponsor/i.test(q)) return needsSponsor ? 'no' : 'yes';
+    return needsSponsor ? 'yes' : 'no';
+  }
+  if (/right to work|work permit|authoris.*work|authoriz.*work|eligible.*work|legal.*work|entitled to work|permit to work/i.test(q)) {
+    return needsSponsor ? 'no' : 'yes';
+  }
+  if (/reloc/i.test(q)) return cfg.APPLICANT.willingToRelocate ? 'yes' : 'no';
+  if (/driving.*licen|licen.*driving|valid.*licen|full (uk )?licen/i.test(q)) return cfg.APPLICANT.drivingLicence ? 'yes' : 'no';
+  return null;
+}
+
 async function answerScreeningQuestions(page) {
   // ── Radio buttons ────────────────────────────────────────────────────────
   try {
@@ -714,23 +735,12 @@ async function answerScreeningQuestions(page) {
       }
 
       let target = null;
-      const _needsSponsor = cfg.APPLICANT.requiresSponsorship;
-      if (/right to work|work permit|authoris.*work|authoriz.*work|eligible.*work|legal.*work/i.test(question)) {
-        // "Do you have the right to work?" — yes if user does NOT require sponsorship
-        target = options.find(o => (!_needsSponsor) ? o.label.startsWith('yes') : o.label.startsWith('no'));
-      } else if (/require.*sponsor|need.*sponsor|visa.*sponsor|sponsor.*required|employer.*sponsor|sponsor/i.test(question)) {
-        // "Do you require visa sponsorship?" — yes only if user needs it
-        target = options.find(o => _needsSponsor ? o.label.startsWith('yes') : o.label.startsWith('no'));
+      const _yn = sensitiveYesNo(question);
+      if (_yn) {
+        target = options.find(o => _yn === 'yes' ? o.label.startsWith('yes') : o.label.startsWith('no'));
+        if (/sponsor/i.test(question)) console.log(`  [Reed] Sponsorship question → ${_yn === 'yes' ? 'Yes' : 'No'}`);
       } else if (/commut|travel to|able to.*office|willing to.*office/i.test(question)) {
         target = options.find(o => o.label.startsWith('yes'));
-      } else if (/reloc/i.test(question)) {
-        target = cfg.APPLICANT.willingToRelocate
-          ? options.find(o => o.label.startsWith('yes'))
-          : options.find(o => o.label.startsWith('no'));
-      } else if (/driving.*licen|licen.*driving|valid.*licen/i.test(question)) {
-        target = cfg.APPLICANT.drivingLicence
-          ? options.find(o => o.label.startsWith('yes'))
-          : options.find(o => o.label.startsWith('no'));
       } else if (/gender/i.test(question)) {
         const g = cfg.APPLICANT.eeoGender;
         if (g === 'female') target = options.find(o => /\bfemale\b|\bwoman\b/i.test(o.label));
@@ -768,7 +778,25 @@ async function answerScreeningQuestions(page) {
 
       if (target) {
         const already = await target.radio.isChecked().catch(() => false);
-        if (!already) await target.radio.click().catch(() => {});
+        if (!already) {
+          await target.radio.scrollIntoViewIfNeeded().catch(() => {});
+          // Reed styles its radios — clicking the hidden <input> can do nothing,
+          // so verify it checked and fall back to clicking the parent <label>.
+          let ok = false;
+          try { await target.radio.click({ timeout: 2000 }); ok = await target.radio.isChecked().catch(() => false); } catch (_) {}
+          if (!ok) {
+            try {
+              await target.radio.evaluate(el => {
+                const lab = (el.id && document.querySelector(`label[for="${el.id}"]`)) || el.closest('label');
+                (lab || el).click();
+              });
+              ok = await target.radio.isChecked().catch(() => false);
+            } catch (_) {}
+          }
+          if (!ok) console.log(`  [Reed] ⚠ Radio not set: "${(question || '').substring(0, 45)}"`);
+        }
+      } else if (question) {
+        console.log(`  [Reed] ⚠ No answer for radio: "${question.substring(0, 50)}"`);
       }
     }
   } catch (_) {}
@@ -794,11 +822,10 @@ async function answerScreeningQuestions(page) {
       );
 
       let chosen = null;
-      const _needsSponsor2 = cfg.APPLICANT.requiresSponsorship;
-      if (/right to work|work permit|authoris.*work|authoriz.*work|eligible.*work|legal.*work/i.test(question)) {
-        chosen = nonEmpty.find(o => (!_needsSponsor2) ? o.text.startsWith('yes') : o.text.startsWith('no')) || nonEmpty[0];
-      } else if (/require.*sponsor|need.*sponsor|visa.*sponsor|sponsor.*required|sponsor/i.test(question)) {
-        chosen = nonEmpty.find(o => _needsSponsor2 ? o.text.startsWith('yes') : o.text.startsWith('no')) || nonEmpty[0];
+      const _yn = sensitiveYesNo(question);
+      if (_yn) {
+        chosen = nonEmpty.find(o => _yn === 'yes' ? o.text.startsWith('yes') : o.text.startsWith('no')) || nonEmpty[0];
+        if (/sponsor/i.test(question)) console.log(`  [Reed] Sponsorship dropdown → ${_yn === 'yes' ? 'Yes' : 'No'}`);
       } else if (/year|experience/i.test(question)) {
         const yr = cfg.APPLICANT.yearsExperience || 0;
         chosen = nonEmpty.find(o => new RegExp(`\\b${yr}\\b`).test(o.text)) ||
@@ -839,11 +866,9 @@ async function answerScreeningQuestions(page) {
         return (lab ? lab.innerText : '').toLowerCase();
       });
 
-      const _needsSponsor3 = cfg.APPLICANT.requiresSponsorship;
-      if (/right to work|work permit|authoris.*work|authoriz.*work|eligible.*work|legal.*work/i.test(question)) {
-        await inp.fill((!_needsSponsor3) ? 'Yes' : 'No').catch(() => {});
-      } else if (/require.*sponsor|need.*sponsor|visa.*sponsor|sponsor/i.test(question)) {
-        await inp.fill(_needsSponsor3 ? 'Yes' : 'No').catch(() => {});
+      const _yn = sensitiveYesNo(question);
+      if (_yn) {
+        await inp.fill(_yn === 'yes' ? 'Yes' : 'No').catch(() => {});
       } else if (/commut|travel/i.test(question)) {
         await inp.fill('Yes').catch(() => {});
       } else if (/reloc/i.test(question)) {

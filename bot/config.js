@@ -13,6 +13,11 @@ if (!USER_DATA) {
   throw new Error('JOBBOT_USERDATA environment variable is required');
 }
 
+// Hard ceiling on applications/day (total across all agents). Enforced here so a
+// tampered DB or stale high value can never exceed it. Keep in sync with the UI
+// dropdown in src/renderer/app.js.
+const DAILY_APPLICATION_CAP = 25;
+
 // ── Static paths — available synchronously at require-time ──
 const OUTPUT_DIR = path.join(USER_DATA, 'output');
 const LOGS_DIR = path.join(USER_DATA, 'logs');
@@ -52,7 +57,7 @@ const cfg = {
   LOCATION: 'United Kingdom',
   CONTRACT_TYPE: 'any',
   SKIP_EXTERNAL_SITES: true,
-  MAX_APPLICATIONS_PER_DAY: 50,
+  MAX_APPLICATIONS_PER_DAY: 15,
   MIN_SCORE: 0,
   SCHEDULE_ENABLED: false,
   SCHEDULE_DAYS: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'],
@@ -134,7 +139,10 @@ const cfg = {
       cfg.JOB_AGE = prefs.job_age || 'r1209600';
 
       cfg.SKIP_EXTERNAL_SITES = !!profile.skip_external_sites;
-      cfg.MAX_APPLICATIONS_PER_DAY = Math.max(profile.max_applications_per_day ?? 50, cfg.MAX_APPLICATIONS_PER_DAY);
+      // Respect the user's chosen daily limit, but hard-cap at 25/day regardless
+      // of what's stored (protects the shared proxy IP and the user's accounts —
+      // can't be bypassed by editing the DB).
+      cfg.MAX_APPLICATIONS_PER_DAY = Math.min(profile.max_applications_per_day ?? 15, DAILY_APPLICATION_CAP);
       cfg.MIN_SCORE = profile.min_match_score ?? 0;
 
       cfg.SCHEDULE_ENABLED = !!(prefs.schedule_enabled);

@@ -174,4 +174,22 @@ async function connectToRunningChrome(port) {
   return ctx;
 }
 
-module.exports = { launchPersistentContext, connectToRunningChrome, humanWarmup, waitForCloudflareSolve };
+// Playwright throws these when the page / context / browser has gone away.
+const BROWSER_CLOSED_RE = /Target (page|frame|closed)|context was (destroyed|closed)|context.*closed|browser.*closed|page.*closed|has been closed|Target closed|Browser closed|websocket.*closed/i;
+
+// When the user closes the Chromium window by hand, stop the agent cleanly —
+// exit(0) so the bot manager shows "stopped" rather than an error, and never
+// relaunch a window they deliberately closed. Returns a guard; set
+// guard.intentional = true before any context.close() the bot performs itself so
+// it isn't mistaken for a manual close.
+function watchForManualClose(context, label) {
+  const guard = { intentional: false };
+  context.on('close', () => {
+    if (guard.intentional) return;
+    console.log(`  [${label}] Browser window closed — agent stopped.`);
+    process.exit(0);
+  });
+  return guard;
+}
+
+module.exports = { launchPersistentContext, connectToRunningChrome, humanWarmup, waitForCloudflareSolve, BROWSER_CLOSED_RE, watchForManualClose };

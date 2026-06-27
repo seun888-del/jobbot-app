@@ -16,7 +16,7 @@ const queue    = require('./modules/queue_manager');
 const logger   = require('./modules/logger');
 const salary   = require('./modules/salary_filter');
 const stealth  = require('./modules/stealth');
-const { launchPersistentContext, connectToRunningChrome } = require('./modules/browser_launcher');
+const { launchPersistentContext, connectToRunningChrome, watchForManualClose, BROWSER_CLOSED_RE } = require('./modules/browser_launcher');
 const path     = require('path');
 
 const DELAY         = ms => new Promise(r => setTimeout(r, ms));
@@ -294,27 +294,47 @@ async function main() {
     ? await connectToRunningChrome(parseInt(cdpPort)).catch(() => launchPersistentContext(profileDir))
     : await launchPersistentContext(profileDir);
   await stealth.applyToContext(context);
+  // User closing the Chromium window → clean stop, not an error
+  const closeGuard = watchForManualClose(context, 'LinkedIn Bot');
 
   const liPage = await context.newPage();
   try {
     await linkedin.ensureLoggedIn(liPage);
   } catch (err) {
+    if (BROWSER_CLOSED_RE.test(err.message || '')) {
+      console.log('  [LinkedIn Bot] Browser window closed — agent stopped.');
+      process.exit(0);
+    }
     console.error('ERROR: ' + err.message);
     await context.close().catch(() => {});
     process.exit(1);
   }
 
-  while (true) {
-    await phase2_applyReadyCVs(liPage);
-    await phase1_searchAndQueue(liPage);
-    await phase2_applyReadyCVs(liPage);
-    logger.printSummary();
-    console.log('\n  [LinkedIn Bot] Cycle complete. Waiting 1 min before next search...');
-    await DELAY(60 * 1000);
+  try {
+    while (true) {
+      await phase2_applyReadyCVs(liPage);
+      await phase1_searchAndQueue(liPage);
+      await phase2_applyReadyCVs(liPage);
+      logger.printSummary();
+      console.log('\n  [LinkedIn Bot] Cycle complete. Waiting 1 min before next search...');
+      await DELAY(60 * 1000);
+    }
+  } catch (err) {
+    if (BROWSER_CLOSED_RE.test(err.message || '')) {
+      console.log('  [LinkedIn Bot] Browser window closed — agent stopped.');
+      closeGuard.intentional = true;
+      await context.close().catch(() => {});
+      process.exit(0);
+    }
+    throw err;
   }
 }
 
 main().catch(err => {
+  if (BROWSER_CLOSED_RE.test(err?.message || '')) {
+    console.log('  [LinkedIn Bot] Browser window closed — agent stopped.');
+    process.exit(0);
+  }
   console.error('Fatal error:', err);
   process.exit(1);
 });

@@ -16,7 +16,7 @@ const logger    = require('./modules/logger');
 const salary    = require('./modules/salary_filter');
 const stealth   = require('./modules/stealth');
 const atsFiller = require('./modules/ats_filler');
-const { launchPersistentContext, connectToRunningChrome } = require('./modules/browser_launcher');
+const { launchPersistentContext, connectToRunningChrome, watchForManualClose, BROWSER_CLOSED_RE } = require('./modules/browser_launcher');
 const path      = require('path');
 
 
@@ -340,11 +340,17 @@ async function main() {
 
   // Outer loop: relaunch the browser if the context dies mid-session
   while (true) {
-    let context, reedPage;
+    let context, reedPage, closeGuard;
     try {
       ({ context, page: reedPage } = await launchBrowser());
+      // User closing the Chromium window → clean stop, not an error or relaunch
+      closeGuard = watchForManualClose(context, 'Reed Bot');
       await reed.ensureLoggedIn(reedPage);
     } catch (err) {
+      if (BROWSER_CLOSED_RE.test(err.message || '')) {
+        console.log('  [Reed Bot] Browser window closed — agent stopped.');
+        process.exit(0);
+      }
       console.error('  [Reed Bot] Failed to launch browser or log in: ' + err.message);
       await context?.close().catch(() => {});
       process.exit(1);
@@ -360,12 +366,13 @@ async function main() {
         await DELAY(60 * 1000);
       }
     } catch (err) {
-      if (CONTEXT_DEAD_RE.test(err.message)) {
-        console.error(`\n  [Reed Bot] Browser context died: ${err.message}`);
-        console.error('  [Reed Bot] Relaunching browser in 15 s...');
+      if (CONTEXT_DEAD_RE.test(err.message) || BROWSER_CLOSED_RE.test(err.message)) {
+        // Browser window was closed (almost always the user clicking ✕) — stop
+        // cleanly so the agent shows "stopped", don't error or pop a new window open.
+        console.log('  [Reed Bot] Browser window closed — agent stopped.');
+        if (closeGuard) closeGuard.intentional = true;
         await context.close().catch(() => {});
-        await DELAY(15000);
-        // Outer while(true) relaunches a fresh context
+        process.exit(0);
       } else {
         console.error('Fatal error:', err);
         process.exit(1);
@@ -375,6 +382,10 @@ async function main() {
 }
 
 main().catch(err => {
+  if (BROWSER_CLOSED_RE.test(err?.message || '')) {
+    console.log('  [Reed Bot] Browser window closed — agent stopped.');
+    process.exit(0);
+  }
   console.error('Fatal error:', err);
   process.exit(1);
 });

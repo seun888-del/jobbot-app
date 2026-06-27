@@ -4,13 +4,19 @@
  * Tailors a parsed CV object (cv_parser.js) to a specific job description, then
  * hands the object to cv_pdf_writer.writeStructuredPDF for rendering.
  *
- * Tailoring is deliberately low-risk — it never invents experience:
+ * Tailoring rewrites the CV to read naturally to a recruiter (not just to pass
+ * ATS keyword filters) while never inventing experience:
  *   • subtitle  → mirror the JD's job title
- *   • bullets   → SELECT and reorder the most relevant existing bullets per role
- *                 (drops weak ones; never rewrites or fabricates)
+ *   • profile   → rewrite the summary into natural, role-targeted prose (truthful)
+ *   • bullets   → SELECT the most relevant bullets per role, then rewrite each into
+ *                 natural, outcome-led prose using the JD's terminology
  *   • skills    → reorder categories by JD relevance, then weave in any genuine
  *                 missing JD keywords that aren't fabricated
- *   • profile / education / name / contact → untouched
+ *   • education / name / contact → untouched
+ *
+ * The anti-fabrication verifier guards every rewrite: any bullet or summary that
+ * introduces a tool, number, certification, or claim absent from the candidate's
+ * own CV is rejected and the original field is kept.
  *
  * Every step validates the LLM output and falls back to the original field on any
  * malformed or suspicious response, so a bad model reply can never corrupt the CV.
@@ -40,6 +46,45 @@ Return ONE short headline (3 to 7 words) that mirrors the job title above, optio
     }
   } catch (_) {}
   return currentSubtitle;
+}
+
+// ── Professional summary ─────────────────────────────────────────────────────
+// Rewrites the top-of-CV summary so it speaks to THIS job and reads naturally to
+// a recruiter. Truthful: the same anti-fabrication verifier (see below) rejects
+// any summary that introduces a tool/number/cert the CV doesn't already support,
+// falling back to the original. Kept to a single paragraph for the layout.
+async function tailorProfile(profile, jobTitle, jdExcerpt, corpus) {
+  if (!profile || profile.trim().length < 30) return profile;
+  const prompt = `You are rewriting the professional summary at the top of a candidate's CV so it speaks directly to a specific job and reads naturally to a recruiter. Summarise ONLY what the CV already demonstrates — never inflate.
+
+JOB TITLE: ${jobTitle}
+
+JOB DESCRIPTION (excerpt):
+${jdExcerpt}
+
+CURRENT SUMMARY:
+${profile}
+
+Rewrite the summary so that:
+- It positions the candidate for THIS role using the job's language where it is genuinely true of them.
+- It foregrounds their most relevant real strengths and experience.
+- It reads as confident, natural professional prose — 2 to 4 sentences, no buzzword soup, no "I"/first-person, no bullet points.
+
+Absolute rules:
+- Do NOT invent or imply any tool, technology, certification, metric, number, seniority, or years of experience the CV does not already support.
+- Do NOT add quantified claims that weren't already there.
+Return ONLY the rewritten summary as a single paragraph — no label, no quotes, no commentary.`;
+  try {
+    const raw = (await llmChat(prompt, 30000)) || '';
+    const para = raw.replace(/^\s*(summary|profile)\s*[:\-]\s*/i, '').replace(/\s*\n+\s*/g, ' ').replace(/^["']+|["']+$/g, '').trim();
+    const maxLen = Math.max(700, Math.round(profile.length * 1.6));
+    if (para.length >= 40 && para.length <= maxLen
+        && !REFUSAL_RE.test(para.slice(0, 120))
+        && !introducesNewFacts(corpus, para)) {
+      return para;
+    }
+  } catch (_) {}
+  return profile;
 }
 
 // ── Bullet selection (per role) ──────────────────────────────────────────────
@@ -106,8 +151,9 @@ function introducesNewFacts(originalCorpus, reworded) {
   return false;
 }
 
-// Select the most relevant bullets for a role AND lightly reword each to mirror
-// the JD's terminology — without ever adding facts the candidate didn't state.
+// Select the most relevant bullets for a role AND genuinely rewrite each into
+// natural, recruiter-grade prose tuned to the JD — without ever adding facts the
+// candidate didn't state (the anti-fabrication verifier below enforces this).
 async function selectAndRewordBullets(role, jdExcerpt) {
   const bullets = role.bullets || [];
   if (!bullets.length) return bullets;
@@ -115,24 +161,28 @@ async function selectAndRewordBullets(role, jdExcerpt) {
   const indexed   = bullets.map((b, i) => `[${i + 1}] ${b}`).join('\n');
   const originals = bullets.join('  ');   // corpus for the anti-fabrication check
 
-  const prompt = `You are lightly tailoring CV bullet points to a specific job. This is rephrasing for emphasis — NOT a rewrite, and NOT invention.
+  const prompt = `You are rewriting CV bullet points so they read naturally and persuasively to a HUMAN recruiter for a specific job — not just to pass keyword filters. Make them genuinely strong, but stay 100% truthful to what the candidate actually did.
 
 JOB DESCRIPTION (excerpt):
 ${jdExcerpt}
 
 ROLE: ${role.title} at ${role.company}
-BULLET POINTS:
+ORIGINAL BULLETS:
 ${indexed}
 
 Task:
-1. Choose up to ${MAX_BULLETS_PER_ROLE} bullets most relevant to the job, most relevant first.
-2. Lightly reword each chosen bullet to use the job's terminology where it means the same thing.
+1. Choose up to ${MAX_BULLETS_PER_ROLE} bullets most relevant to this job, strongest and most relevant first.
+2. Rewrite each chosen bullet in clear, natural, professional English a recruiter would respect:
+   - Open with a strong, varied action verb (don't reuse the same opener twice).
+   - Lead with the impact or outcome when the original bullet already implies one.
+   - Use the job's own terminology wherever it genuinely means the same thing as what the candidate wrote.
+   - It should read like a person wrote it, never like a keyword list.
 
-Strict rules:
-- Keep EVERY fact, tool, system, company, and number exactly as written — do not add, remove, or change any of them.
-- Do NOT introduce any tool, technology, certification, metric, or claim that is not already in that bullet.
-- Keep each bullet to a single concise line.
-Return ONLY the chosen bullets, one per line, each starting with "- ". No numbering, no commentary.`;
+Strict truthfulness rules (absolute — these override everything above):
+- Do NOT invent or imply any tool, technology, certification, metric, number, employer, or achievement that is not already in that original bullet. Rephrasing only — no new facts.
+- Do NOT add quantified results (percentages, figures, counts) that weren't already stated.
+- Keep each bullet to ONE sentence that comfortably fits about one line (aim for 22 words or fewer).
+Return ONLY the rewritten bullets, one per line, each starting with "- ". No numbering, no commentary.`;
 
   try {
     const out = await llmChat(prompt, 30000);
@@ -272,6 +322,18 @@ async function tailorStructured(cv, jobTitle, jdText, missingKeywords = [], cvFu
   // 1. Subtitle
   out.subtitle = await tailorSubtitle(cv.subtitle, jobTitle, jd);
   console.log(`  [Tailor] Subtitle → "${out.subtitle}"`);
+
+  // 1b. Professional summary — natural, recruiter-facing rewrite. The corpus is
+  //     the WHOLE CV so the summary may legitimately reference real skills/tools
+  //     from any section; the verifier still blocks anything the CV can't support.
+  const corpus = [
+    cv.profile || '',
+    ...out.experience.flatMap(j => [j.title, j.company, ...(j.bullets || [])]),
+    ...out.skills.map(s => `${s.label || ''} ${s.items || ''}`),
+    cv.subtitle || '',
+  ].join('  ');
+  out.profile = await tailorProfile(cv.profile, jobTitle, jd, corpus);
+  console.log(`  [Tailor] Summary ${out.profile === cv.profile ? 'kept original' : 'rewritten to JD'}`);
 
   // 2. Bullets — select most relevant per role AND lightly reword to the JD,
   //    rejecting any rewrite that introduces a new fact (sequential = rate-limit safe)

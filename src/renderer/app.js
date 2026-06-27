@@ -580,7 +580,17 @@ async function renderSearch() {
 
     <div class="card">
       <h3>Application Limits</h3>
-      <div class="field"><label>Max applications per day</label><input id="max_apps" type="number" min="1"></div>
+      <div class="field">
+        <label>Max applications per day</label>
+        <select id="max_apps">
+          <option value="5">5</option>
+          <option value="10">10</option>
+          <option value="15">15</option>
+          <option value="20">20</option>
+          <option value="25">25</option>
+        </select>
+        <span class="field-hint">Total across all agents. Capped at 25/day to protect your accounts and keep applications looking human.</span>
+      </div>
       <div class="field">
         <label>Minimum match score (%)</label>
         <input id="min_score" type="number" min="0" max="100" placeholder="e.g. 60">
@@ -601,7 +611,12 @@ async function renderSearch() {
 
   // Pre-fill profile-backed fields
   const profile = await window.api.profile.get();
-  document.getElementById('max_apps').value = profile.max_applications_per_day ?? 15;
+  // Snap any stored value (incl. legacy values above the cap) to a valid option ≤ 25
+  const allowedApps = [5, 10, 15, 20, 25];
+  const storedApps = Math.min(Number(profile.max_applications_per_day) || 15, 25);
+  document.getElementById('max_apps').value = String(
+    allowedApps.reduce((a, b) => Math.abs(b - storedApps) <= Math.abs(a - storedApps) ? b : a, 15)
+  );
   document.getElementById('min_score').value = profile.min_match_score ?? '';
   document.getElementById('seek_sponsorship').checked = !!profile.seek_sponsorship;
 
@@ -613,7 +628,7 @@ async function renderSearch() {
       job_age: document.getElementById('job_age').value,
     });
     await window.api.profile.save({
-      max_applications_per_day: Number(document.getElementById('max_apps').value) || 15,
+      max_applications_per_day: Math.min(Number(document.getElementById('max_apps').value) || 15, 25),
       min_match_score: document.getElementById('min_score').value !== '' ? Number(document.getElementById('min_score').value) : null,
       seek_sponsorship: document.getElementById('seek_sponsorship').checked ? 1 : 0,
     });
@@ -846,6 +861,17 @@ let botStatusUnsub = null;
 let dashboardHasLicense = false;
 
 function setBotControlsState(botName, status) {
+  // The Scorer has no card — it auto-runs alongside the application agents — so
+  // reflect its state in the status pill next to the Start applying button.
+  if (botName === 'scorer') {
+    const pill = document.getElementById('scorer-pill');
+    if (pill) {
+      const running = status === 'running';
+      pill.dataset.status = status;
+      pill.textContent = running ? '✨ AI tailoring active' : 'AI tailoring: idle';
+      pill.classList.toggle('scorer-pill-active', running);
+    }
+  }
   const badge = document.getElementById(`status-${botName}`);
   if (badge) {
     badge.textContent = status;
@@ -857,6 +883,25 @@ function setBotControlsState(botName, status) {
   const stopBtn = content.querySelector(`button[data-bot="${botName}"][data-action="stop"]`);
   if (startBtn) startBtn.disabled = !dashboardHasLicense || status === 'running';
   if (stopBtn) stopBtn.disabled = status !== 'running';
+  updateStartAllState();
+}
+
+// Keep the "Start applying" / "Stop" all-agents buttons in sync with the live
+// per-agent statuses (read from the visible application-agent cards).
+function updateStartAllState() {
+  const startAll = content && content.querySelector('.start-applying-btn');
+  const stopAll  = content && content.querySelector('.stop-all-btn');
+  if (!startAll && !stopAll) return;
+  const statuses = Array.from(content.querySelectorAll('.bot-card .bot-status')).map(b => b.textContent.trim());
+  const anyRunning = statuses.some(s => s === 'running');
+  const allRunning = statuses.length > 0 && statuses.every(s => s === 'running');
+  if (startAll) startAll.disabled = !dashboardHasLicense || allRunning;
+  if (stopAll)  stopAll.disabled  = !anyRunning;
+  // Light up checklist step 4 while the agents are applying
+  const mark4 = document.getElementById('gs-mark-4');
+  if (mark4) mark4.innerHTML = gsMark(anyRunning, 4);
+  const done4 = document.getElementById('gs-done-4');
+  if (done4) done4.style.display = anyRunning ? '' : 'none';
 }
 
 function buildApplicationsGraph(dailyApps) {
@@ -905,11 +950,38 @@ function buildPreflightWarning(profile, cvs) {
   }
   if (!cvs || cvs.length === 0) {
     warnings.push(`<div class="preflight-warning">
-      &#9888; No CV uploaded — the Scorer Agent cannot tailor applications without one.
+      &#9888; No CV uploaded — the Agent cannot tailor applications without one.
       <button class="preflight-link" data-view="cvs">Add a CV →</button>
     </div>`);
   }
   return warnings.join('');
+}
+
+// "How to start" checklist — makes the two-step flow (connect → Start applying)
+// obvious. Profile/CV steps are auto-ticked; connect/start are guided actions.
+function gsMark(ok, n) {
+  return ok
+    ? '<span class="gs-step gs-step-done">✓</span>'
+    : `<span class="gs-step gs-step-num">${n}</span>`;
+}
+function buildGetStartedCard(profile, cvs, anyConnected, anyRunning) {
+  const profileDone = !!(profile?.first_name && profile?.last_name && profile?.email && profile?.phone);
+  const cvDone      = !!(cvs && cvs.length);
+  const mark = gsMark;
+  return `
+    <div class="card get-started-card">
+      <h3>How to start applying</h3>
+      <ol class="get-started-steps">
+        <li>${mark(profileDone, 1)}<span>Complete your profile</span>
+          ${profileDone ? '<em class="gs-ok">Done</em>' : '<button class="preflight-link" data-view="personal">Complete profile →</button>'}</li>
+        <li>${mark(cvDone, 2)}<span>Upload a CV</span>
+          ${cvDone ? '<em class="gs-ok">Done</em>' : '<button class="preflight-link" data-view="cvs">Add a CV →</button>'}</li>
+        <li>${mark(anyConnected, 3)}<span>Connect your job sites — click <strong>Connect account</strong> on a card below and log in once</span>
+          ${anyConnected ? '<em class="gs-ok">Done</em>' : ''}</li>
+        <li><span id="gs-mark-4">${mark(anyRunning, 4)}</span><span>Click <strong>Start applying</strong> — the AI scores jobs, tailors your CV and applies for you automatically</span>
+          <em class="gs-ok" id="gs-done-4" style="${anyRunning ? '' : 'display:none'}">Applying…</em></li>
+      </ol>
+    </div>`;
 }
 
 function statusBadgeClass(status) {
@@ -954,7 +1026,7 @@ function bindViewCvButtons(root = content) {
 }
 
 async function renderDashboard() {
-  const [summary, recent, status, license, profile, dailyApps, cvs, reedCred, liCred, gdCred, cvlibCred, tjCred, cwCred] = await Promise.all([
+  const [summary, recent, status, license, profile, dailyApps, cvs, reedCred, liCred, gdCred, cvlibCred, tjCred, cwCred, connectedStatus] = await Promise.all([
     window.api.queue.summary(),
     window.api.queue.recent(20),
     window.api.bot.status(),
@@ -968,12 +1040,20 @@ async function renderDashboard() {
     window.api.credentials.get('cvlibrary'),
     window.api.credentials.get('totaljobs'),
     window.api.credentials.get('cwjobs'),
+    window.api.site.connectedStatus().catch(() => ({})),
   ]);
+  const anyConnected = Object.values(connectedStatus || {}).some(Boolean);
   const isUS = (profile?.country || 'United Kingdom') === 'United States';
   // License key required to start bots
   dashboardHasLicense = !!(license?.license_key);
 
   const dashCreds = { reed: reedCred, linkedin: liCred, glassdoor: gdCred, cvlibrary: cvlibCred, totaljobs: tjCred, cwjobs: cwCred };
+  // Application agents shown on the dashboard (the Scorer is hidden — it auto-runs
+  // alongside these and is surfaced only as the "AI tailoring" pill).
+  const appAgentKeys = Object.keys(BOT_LABELS).filter(k => k !== 'scorer' && !(isUS && k === 'reed'));
+  const scorerRunning = status.scorer === 'running';
+  const allAppRunning = appAgentKeys.length > 0 && appAgentKeys.every(k => status[k] === 'running');
+  const anyAppRunning = appAgentKeys.some(k => status[k] === 'running');
   const counts = {};
   summary.forEach(row => { counts[row.status] = row.count; });
 
@@ -1003,8 +1083,6 @@ async function renderDashboard() {
           <span class="bot-status bot-status-${status[key]}" id="status-${key}">${status[key]}</span>
         </div>
         <div class="bot-card-actions">
-          <button class="primary" data-bot="${key}" data-action="start" ${!dashboardHasLicense || isRunning ? 'disabled' : ''}>Start</button>
-          <button class="secondary" data-bot="${key}" data-action="stop" ${!isRunning ? 'disabled' : ''}>Stop</button>
           ${needsCreds ? `<button class="btn-connect" data-bot="${key}" data-action="connect">Connect account</button>` : ''}
           ${!needsCreds && CONNECT_URLS[key] ? `<button class="btn-connect" data-bot="${key}" data-action="connect-session">Connect account</button>` : ''}
           ${CHROME_SESSION_BOTS.has(key) ? `<button class="btn-connect" data-bot="${key}" data-action="import-chrome" title="Copy your real Chrome session into the bot profile — bypasses Cloudflare verification">Use my Chrome →</button>` : ''}
@@ -1026,8 +1104,19 @@ async function renderDashboard() {
 
     ${buildPreflightWarning(profile, cvs)}
 
+    ${buildGetStartedCard(profile, cvs, anyConnected, anyAppRunning)}
+
+    <div class="start-applying-bar">
+      <button class="primary start-applying-btn" data-action="start-all"
+        ${(!dashboardHasLicense || allAppRunning) ? 'disabled' : ''}
+        ${!dashboardHasLicense ? 'title="Activate a license to start the Agents"' : ''}>▶ Start applying</button>
+      <button class="secondary stop-all-btn" data-action="stop-all" ${anyAppRunning ? '' : 'disabled'}>Stop</button>
+      <span class="scorer-pill${scorerRunning ? ' scorer-pill-active' : ''}" id="scorer-pill" data-status="${status.scorer || 'stopped'}"
+        title="The AI tailoring engine runs automatically while the Agents are applying — you don't start it yourself.">${scorerRunning ? '✨ AI tailoring active' : 'AI tailoring: idle'}</span>
+    </div>
+
     <div class="bot-controls">
-      ${Object.entries(BOT_LABELS).filter(([key]) => !(isUS && key === 'reed')).map(([key, label]) => buildBotCard(key, label)).join('')}
+      ${appAgentKeys.map(key => buildBotCard(key, BOT_LABELS[key])).join('')}
     </div>
     <div class="status-msg" id="bot-error"></div>
 
@@ -1140,6 +1229,21 @@ async function renderDashboard() {
         tip.textContent = 'Your Chrome session is now active — click Start to run the Agent.';
         if (card && !card.querySelector('.chrome-import-tip')) { tip.className = 'chrome-import-tip'; card.appendChild(tip); }
         setTimeout(() => { btn.textContent = origText; btn.disabled = false; btn.style.background = ''; btn.style.color = ''; }, 5000);
+        return;
+      }
+      if (btn.dataset.action === 'start-all' || btn.dataset.action === 'stop-all') {
+        if (btn.dataset.action === 'start-all' && !dashboardHasLicense) return;
+        const errorEl = document.getElementById('bot-error');
+        errorEl.className = 'status-msg';
+        errorEl.textContent = '';
+        const op = btn.dataset.action === 'start-all' ? 'start' : 'stop';
+        btn.disabled = true;
+        for (const key of appAgentKeys) {
+          try { await window.api.bot[op](key); } catch (err) {
+            errorEl.className = 'status-msg error';
+            errorEl.textContent = `Error starting ${BOT_LABELS[key]}: ${err.message}`;
+          }
+        }
         return;
       }
       if (btn.dataset.action === 'start' && !dashboardHasLicense) return;

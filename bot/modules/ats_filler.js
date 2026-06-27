@@ -181,8 +181,12 @@ async function _fillStep(page, job) {
       if (!question || !options.length) continue;
       const chosen = _pickDropdownOption(question, options) || await _aiPickOption(question, options.map(o => o.text), job);
       if (chosen) {
-        const match = options.find(o => o.text === chosen || o.val === chosen);
+        const match = options.find(o => o.text === chosen || o.val === chosen)
+          || options.find(o => o.text.trim().toLowerCase() === String(chosen).trim().toLowerCase());
         if (match) { await sel.selectOption(match.val); await J(200, 400); console.log(`  [ATS] Select "${question.substring(0, 40)}" → "${chosen}"`); }
+        else console.log(`  [ATS] ⚠ Dropdown no match: "${question.substring(0, 40)}" (wanted "${chosen}")`);
+      } else {
+        console.log(`  [ATS] ⚠ No answer for dropdown: "${question.substring(0, 50)}"`);
       }
     } catch (_) {}
   }
@@ -211,11 +215,30 @@ async function _fillStep(page, job) {
 
       const chosen = _pickRadioOption(legend, options.map(o => o.text)) || await _aiPickOption(legend, options.map(o => o.text), job);
       if (chosen) {
-        const match = options.find(o => o.text === chosen);
-        if (match) {
-          const el = await page.$(`input[type="radio"][name="${groupName}"][value="${match.val}"]`);
-          if (el) { await el.click(); await J(200, 400); console.log(`  [ATS] Radio "${(legend || '').substring(0, 40)}" → "${chosen}"`); }
+        // Click by index (LinkedIn hides the real <input> and styles the label,
+        // so a value-based click often does nothing). Verify it actually checked,
+        // and fall back to clicking the associated label.
+        const idx = options.findIndex(o => o.text === chosen);
+        const groupRadios = idx >= 0 ? await page.$$(`input[type="radio"][name="${groupName}"]`) : [];
+        const target = groupRadios[idx];
+        let ok = false;
+        if (target) {
+          try { await target.click({ timeout: 2000 }); ok = await target.isChecked().catch(() => false); } catch (_) {}
+          if (!ok) {
+            try {
+              await target.evaluate(el => {
+                const lab = el.id ? document.querySelector(`label[for="${el.id}"]`) : el.closest('label');
+                (lab || el).click();
+              });
+              ok = await target.isChecked().catch(() => false);
+            } catch (_) {}
+          }
+          await J(200, 400);
         }
+        if (ok) console.log(`  [ATS] Radio "${(legend || '').substring(0, 40)}" → "${chosen}"`);
+        else    console.log(`  [ATS] ⚠ Radio NOT set: "${(legend || '').substring(0, 40)}" (wanted "${chosen}")`);
+      } else {
+        console.log(`  [ATS] ⚠ No answer for radio: "${(legend || '').substring(0, 50)}"`);
       }
     } catch (_) {}
   }
@@ -305,6 +328,35 @@ async function _tryNext(page) {
   return false;
 }
 
+// Resolves known yes/no application questions to the user's ACTUAL profile
+// answer. Sponsorship is handled SEPARATELY from right-to-work — conflating the
+// two made the agent answer "Yes, I need sponsorship" for users who have the
+// right to work and need none. Returns 'yes' | 'no' | null.
+function _yesNoForQuestion(question) {
+  const q = (question || '').toLowerCase();
+  const rtw = cfg.APPLICANT.rightToWorkCountries || [];
+  const hasRightToWork = rtw.some(c => /uk|united kingdom|britain|england|scotland|wales|northern ireland|gb\b/i.test(c));
+  // Explicit profile flag wins; otherwise infer (has right to work ⇒ no sponsorship needed)
+  const requiresSponsorship = typeof cfg.APPLICANT.requiresSponsorship === 'boolean'
+    ? cfg.APPLICANT.requiresSponsorship
+    : !hasRightToWork;
+
+  // Sponsorship FIRST — a sponsorship question usually also contains "work"
+  // (e.g. "require sponsorship to work in the UK"), so it must win over the
+  // right-to-work branch below.
+  if (/sponsor/i.test(q)) {
+    if (/without sponsor/i.test(q)) return requiresSponsorship ? 'no' : 'yes'; // inverted phrasing
+    return requiresSponsorship ? 'yes' : 'no';
+  }
+  // Right to work / authorisation / eligibility
+  if (/right to work|authori[sz]ed to work|authori[sz]ation to work|eligible to work|legally (allowed|entitled|able) to work|entitled to work|permit to work|work permit/i.test(q)) {
+    return hasRightToWork ? 'yes' : 'no';
+  }
+  if (/reloc/i.test(q)) return cfg.APPLICANT.willingToRelocate ? 'yes' : 'no';
+  if (/driv(ing|er).?s? licen[cs]e|full (uk )?licen[cs]e/i.test(q)) return cfg.APPLICANT.drivingLicence ? 'yes' : 'no';
+  return null;
+}
+
 // ── Rule-based answer builder ──────────────────────────────────────────────
 async function _buildAnswer(question, fieldType, job) {
   const { yearsExperience, salaryExpectation, availability, location,
@@ -324,12 +376,13 @@ async function _buildAnswer(question, fieldType, job) {
     return AVAIL_MAP[availability || 'immediately'] || 'Immediately available';
   if (/salary|compensation|expected pay|remuneration/i.test(q))
     return salaryExpectation || '';
-  if (/reloc/i.test(q))
-    return cfg.APPLICANT.willingToRelocate ? 'Yes' : 'No';
   if (/year.*experience|experience.*year|how many year/i.test(q))
     return String(yearsExperience ?? 0);
-  if (/right to work|eligib.*work|work.*eligib|visa.*sponsor|sponsorship.*requir/i.test(q))
-    return (rightToWorkCountries || []).some(c => /uk|united kingdom|britain/i.test(c)) ? 'Yes' : 'No';
+  // Sponsorship / right-to-work / relocation / driving licence — from profile
+  {
+    const yn = _yesNoForQuestion(question);
+    if (yn) return yn === 'yes' ? 'Yes' : 'No';
+  }
   if (/city|location|where.*based|where do you live/i.test(q))
     return (location || '').split(',')[0].trim() || location || '';
   if (/linkedin/i.test(q))  return linkedin || '';
@@ -355,6 +408,7 @@ Candidate facts:
 - Location: ${location}
 - Availability: ${avail}
 - Right to work in UK: ${(rightToWorkCountries || []).some(c => /uk|united kingdom/i.test(c)) ? 'Yes' : 'No'}
+- Requires visa sponsorship: ${_yesNoForQuestion('do you require sponsorship') === 'yes' ? 'Yes' : 'No'}
 
 Job: ${job.title} at ${job.company}
 
@@ -376,8 +430,9 @@ Write a short, professional answer (1-3 sentences). Sound natural and human. No 
 // ── Rule-based dropdown picker ─────────────────────────────────────────────
 function _pickDropdownOption(question, options) {
   const q = (question || '').toLowerCase();
-  if (/right to work|work.*author|eligib.*work/i.test(q))
-    return options.find(o => /yes|authoris|eligible|citizen/i.test(o.text))?.text || null;
+  const yn = _yesNoForQuestion(question);
+  if (yn === 'yes') return options.find(o => /^\s*yes\b/i.test(o.text))?.text || options.find(o => /authoris|eligible|citizen/i.test(o.text))?.text || null;
+  if (yn === 'no')  return options.find(o => /^\s*no\b/i.test(o.text))?.text || null;
   if (/notice period|availability/i.test(q)) {
     const avail = cfg.APPLICANT.availability || 'immediately';
     if (avail === 'immediately') return options.find(o => /immediate|0|none/i.test(o.text))?.text || null;
@@ -398,12 +453,9 @@ function _pickDropdownOption(question, options) {
 // ── Rule-based radio picker ────────────────────────────────────────────────
 function _pickRadioOption(question, optionTexts) {
   const q = (question || '').toLowerCase();
-  if (/right to work|work.*author|eligib.*work|visa sponsor/i.test(q))
-    return optionTexts.find(t => /^yes/i.test(t)) || null;
-  if (/reloc/i.test(q))
-    return cfg.APPLICANT.willingToRelocate
-      ? optionTexts.find(t => /^yes/i.test(t)) || null
-      : optionTexts.find(t => /^no/i.test(t))  || null;
+  const yn = _yesNoForQuestion(question);
+  if (yn === 'yes') return optionTexts.find(t => /^\s*yes\b/i.test(t)) || null;
+  if (yn === 'no')  return optionTexts.find(t => /^\s*no\b/i.test(t)) || null;
   if (/currently employed|employment status/i.test(q)) {
     const avail = cfg.APPLICANT.availability || 'immediately';
     return avail === 'immediately'
@@ -423,7 +475,7 @@ async function _aiPickOption(question, optionTexts, job) {
     const { firstName, lastName, yearsExperience, availability, rightToWorkCountries } = cfg.APPLICANT;
     const AVAIL_MAP = { 'immediately': 'Immediately', '1week': '1 week', '2weeks': '2 weeks', '1month': '1 month', '3months': '3 months' };
     const prompt =
-`You are completing a job application for ${firstName} ${lastName} (${yearsExperience} yrs experience, availability: ${AVAIL_MAP[availability] || 'immediately'}, right to work UK: ${(rightToWorkCountries||[]).some(c=>/uk/i.test(c))}).
+`You are completing a job application for ${firstName} ${lastName} (${yearsExperience} yrs experience, availability: ${AVAIL_MAP[availability] || 'immediately'}, right to work UK: ${(rightToWorkCountries||[]).some(c=>/uk/i.test(c))}, requires visa sponsorship: ${_yesNoForQuestion('require sponsorship') === 'yes'}).
 
 Question: "${question}"
 Options:
@@ -432,7 +484,11 @@ ${optionTexts.map((t, i) => `${i + 1}. ${t}`).join('\n')}
 Reply with ONLY the exact text of the best option. No explanation.`;
     const reply = await llmChat(prompt);
     const cleaned = (reply || '').trim().replace(/^\d+\.\s*/, '');
-    return optionTexts.find(t => t.toLowerCase() === cleaned.toLowerCase()) || null;
+    const lc = cleaned.toLowerCase();
+    return optionTexts.find(t => t.toLowerCase() === lc)
+      || optionTexts.find(t => t.toLowerCase().startsWith(lc) || lc.startsWith(t.toLowerCase()))
+      || optionTexts.find(t => t.toLowerCase().includes(lc) || lc.includes(t.toLowerCase()))
+      || null;
   } catch (_) { return null; }
 }
 
