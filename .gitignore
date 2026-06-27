@@ -9,3 +9,11 @@ _tmp_*/
 .env.*
 screenshots/
 logs/
+
+# Local debug / scratch scripts and screenshots (never shipped or committed)
+check_*.js
+take_ss.js
+test_remove.js
+watch_tmp.js
+cvlib_*.png
+*_debug.png
